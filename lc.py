@@ -1,22 +1,405 @@
-from flask import Flask, render_template_string, jsonify
+from flask import Flask, render_template_string, jsonify, request
 import requests
 import json
 import threading
 import time
-from collections import deque
+from collections import deque, defaultdict
 import logging
 import math
 from datetime import datetime
-import statistics
+import sys
 import os
+from typing import Dict, List, Tuple, Optional, Any
+import urllib3
+
+# Tắt cảnh báo SSL
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# ======= CẤU HÌNH =======
-URL_MD5 = "https://wtxmd52.tele68.com/v1/txmd5/sessions?cp=R&cl=R&pf=web&at=7e3955a9b92d0a12a675097596748258"
-URL_HU = "https://wtx.tele68.com/v1/tx/sessions?cp=R&cl=R&pf=web&at=4a79fe6ffe00c22102db76778b434c50"
-URL_CACUOC = "https://lc79.bet"
+# ======= CẤU HÌNH GAME =======
+# Token từ trình duyệt
+BEARER_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjb2RlIjowLCJtZXNzYWdlIjoiU3VjY2VzcyIsIm5pY2tOYW1lIjoic2pnZXIzNTMiLCJhY2Nlc3NUb2tlbiI6ImI0MjNkZGIxMTRjNzhhMWM0ZGJhZTQ5NDczMzY0ZGVkIiwiaXNMb2dpbiI6dHJ1ZSwibW9uZXkiOjAsImlkIjoiODY1NjM1OCIsInVzZXJuYW1lIjoia2llbnBoYW0wNjExIiwiaWF0IjoxNzgyNjY4MDMyLCJleHAiOjE3ODI2OTY4MzJ9.bsMIuO1QUwdSxMik_xok7XaDCX0OtB9Ti9zjUCTd7Lk"
+
+GAME_CONFIG = {
+    'lc79': {
+        'name': 'LC79',
+        'color': '#ff6b35',
+        'md5_url': 'https://wtxmd52.tele68.com/v1/txmd5/sessions?cp=R&cl=R&pf=web&at=b423ddb114c78a1c4dbae49473364ded',
+        'hu_url': 'https://wtx.tele68.com/v1/tx/sessions?cp=R&cl=R&pf=web&at=b423ddb114c78a1c4dbae49473364ded',
+        'bet_url': 'https://lc79.bet',
+        'active': True,
+        'headers': {
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br, zstd',
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {BEARER_TOKEN}',
+            'Origin': 'https://lc79b.bet',
+            'Referer': 'https://lc79b.bet/',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'cross-site',
+            'Priority': 'u=1, i',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache'
+        }
+    },
+    'betvip': {
+        'name': 'BETVIP',
+        'color': '#8b6cff',
+        'md5_url': 'https://wtxmd52.macminim6.online/v1/txmd5/sessions?cp=R&cl=R&pf=web&at=f5252fdaf1287cdbfdc6de625acf5611',
+        'hu_url': 'https://wtx.macminim6.online/v1/tx/sessions?cp=R&cl=R&pf=web&at=f5252fdaf1287cdbfdc6de625acf5611',
+        'bet_url': 'https://betvip.com',
+        'active': False
+    }
+}
+
+current_game = 'lc79'
+
+# ======= DICE HISTORY RETRIEVAL ENGINE =======
+
+class DiceHistoryEngine:
+    def __init__(self):
+        self.history = []
+        self.index_by_dice = defaultdict(list)
+        self.index_by_sum = defaultdict(list)
+        self.index_by_type = defaultdict(list)
+        self.last_update = None
+        self.total_samples = 0
+        self.session_ids = set()
+        
+    def get_dice_key(self, dices: List[int]) -> str:
+        if not dices:
+            return ""
+        return "-".join(str(d) for d in sorted(dices))
+    
+    def get_dice_sum(self, dices: List[int]) -> int:
+        return sum(dices) if dices else 0
+    
+    def get_dice_type(self, dices: List[int]) -> str:
+        if not dices:
+            return "unknown"
+        unique = set(dices)
+        if len(unique) == 1:
+            return "triple"
+        elif len(unique) == 2:
+            return "pair"
+        else:
+            return "mixed"
+    
+    def get_parity_pattern(self, dices: List[int]) -> str:
+        if not dices:
+            return ""
+        return "".join("E" if d % 2 == 0 else "O" for d in sorted(dices))
+    
+    def get_high_low_pattern(self, dices: List[int]) -> str:
+        if not dices:
+            return ""
+        return "".join("H" if d >= 4 else "L" for d in sorted(dices))
+    
+    def build_index(self, sessions: List[Dict]):
+        self.history = sessions
+        self.index_by_dice.clear()
+        self.index_by_sum.clear()
+        self.index_by_type.clear()
+        self.session_ids.clear()
+        
+        for session in sessions:
+            session_id = session.get('id')
+            if session_id:
+                self.session_ids.add(session_id)
+            
+            dices = session.get('dices', [])
+            if not dices:
+                continue
+                
+            dice_key = self.get_dice_key(dices)
+            dice_sum = self.get_dice_sum(dices)
+            dice_type = self.get_dice_type(dices)
+            
+            self.index_by_dice[dice_key].append(session)
+            self.index_by_sum[dice_sum].append(session)
+            self.index_by_type[dice_type].append(session)
+        
+        self.total_samples = len(sessions)
+        self.last_update = datetime.now()
+        logging.info(f"📊 Đã xây dựng index: {len(sessions)} phiên, {len(self.index_by_dice)} bộ xúc xắc khác nhau")
+    
+    def calculate_similarity_score(self, target_dices: List[int], matched_dices: List[int]) -> float:
+        if not target_dices or not matched_dices:
+            return 0.0
+            
+        target_sorted = sorted(target_dices)
+        matched_sorted = sorted(matched_dices)
+        
+        if target_sorted == matched_sorted:
+            return 1.0
+        
+        if (sum(target_dices) == sum(matched_dices) and 
+            self.get_dice_type(target_dices) == self.get_dice_type(matched_dices)):
+            return 0.9
+        
+        common = set(target_sorted) & set(matched_sorted)
+        if len(common) >= 2:
+            return 0.8
+        
+        if sum(target_dices) == sum(matched_dices):
+            return 0.7
+        
+        if self.get_dice_type(target_dices) == self.get_dice_type(matched_dices):
+            return 0.6
+        
+        if self.get_parity_pattern(target_dices) == self.get_parity_pattern(matched_dices):
+            return 0.5
+        
+        if self.get_high_low_pattern(target_dices) == self.get_high_low_pattern(matched_dices):
+            return 0.4
+            
+        return 0.0
+    
+    def find_matches(self, target_session: Dict) -> Dict:
+        target_dices = target_session.get('dices', [])
+        if not target_dices:
+            return {'exact_matches': [], 'similar_matches': [], 'all_matches': []}
+        
+        target_key = self.get_dice_key(target_dices)
+        target_sum = self.get_dice_sum(target_dices)
+        target_type = self.get_dice_type(target_dices)
+        target_id = target_session.get('id')
+        
+        exact_matches = []
+        similar_matches = []
+        all_matches = []
+        seen_ids = set()
+        
+        exact = self.index_by_dice.get(target_key, [])
+        for session in exact:
+            session_id = session.get('id')
+            if session_id and session_id != target_id:
+                if session_id not in seen_ids:
+                    seen_ids.add(session_id)
+                    exact_matches.append(session)
+                    all_matches.append(session)
+        
+        for session in self.index_by_sum.get(target_sum, []):
+            session_id = session.get('id')
+            if session_id and session_id != target_id and session_id not in seen_ids:
+                if self.get_dice_type(session.get('dices', [])) == target_type:
+                    seen_ids.add(session_id)
+                    similar_matches.append(session)
+                    all_matches.append(session)
+        
+        for session in self.index_by_sum.get(target_sum, []):
+            session_id = session.get('id')
+            if session_id and session_id != target_id and session_id not in seen_ids:
+                seen_ids.add(session_id)
+                similar_matches.append(session)
+                all_matches.append(session)
+        
+        for session in self.index_by_type.get(target_type, []):
+            session_id = session.get('id')
+            if session_id and session_id != target_id and session_id not in seen_ids:
+                seen_ids.add(session_id)
+                similar_matches.append(session)
+                all_matches.append(session)
+        
+        for session in self.history:
+            session_id = session.get('id')
+            if not session_id or session_id == target_id or session_id in seen_ids:
+                continue
+            
+            session_dices = session.get('dices', [])
+            similarity = self.calculate_similarity_score(target_dices, session_dices)
+            if similarity >= 0.5:
+                seen_ids.add(session_id)
+                similar_matches.append(session)
+                all_matches.append(session)
+        
+        return {
+            'exact_matches': exact_matches,
+            'similar_matches': similar_matches,
+            'all_matches': all_matches
+        }
+    
+    def get_next_session(self, session: Dict) -> Optional[Dict]:
+        current_id = session.get('id')
+        if not current_id:
+            return None
+        
+        for i, s in enumerate(self.history):
+            if s.get('id') == current_id and i > 0:
+                return self.history[i-1]
+        return None
+    
+    def calculate_average_similarity(self, target_dices: List[int], matches: List[Dict]) -> float:
+        if not matches:
+            return 0.0
+        
+        total = 0.0
+        for match in matches:
+            match_dices = match.get('dices', [])
+            similarity = self.calculate_similarity_score(target_dices, match_dices)
+            total += similarity
+        
+        return total / len(matches)
+    
+    def calculate_stability(self, matches: List[Dict]) -> float:
+        if len(matches) < 3:
+            return 0.0
+        
+        results = []
+        for match in matches:
+            next_session = self.get_next_session(match)
+            if next_session:
+                results.append(next_session.get('resultTruyenThong', ''))
+        
+        if not results:
+            return 0.0
+        
+        tai_count = results.count('TAI')
+        xiu_count = results.count('XIU')
+        total = len(results)
+        
+        if total == 0:
+            return 0.0
+        
+        return max(tai_count, xiu_count) / total
+    
+    def analyze(self, target_session: Dict, min_samples: int = 5) -> Dict:
+        target_dices = target_session.get('dices', [])
+        if not target_dices:
+            return self.get_empty_result(target_session)
+        
+        matches = self.find_matches(target_session)
+        exact_matches = matches['exact_matches']
+        similar_matches = matches['similar_matches']
+        all_matches = matches['all_matches']
+        
+        if len(all_matches) < min_samples:
+            return {
+                'prediction': 'NO SIGNAL',
+                'probability': 0.0,
+                'confidence': 0.0,
+                'samples': len(all_matches),
+                'exact_samples': len(exact_matches),
+                'similar_samples': len(similar_matches),
+                'history_size': self.total_samples,
+                'similarity_score': 0.0,
+                'last_dice': target_dices,
+                'signal': 'NO_SIGNAL'
+            }
+        
+        tai_count = 0
+        xiu_count = 0
+        weighted_tai = 0.0
+        weighted_xiu = 0.0
+        total_weight = 0.0
+        
+        for session in exact_matches:
+            next_session = self.get_next_session(session)
+            if next_session:
+                next_result = next_session.get('resultTruyenThong', '')
+                if next_result == 'TAI':
+                    tai_count += 1
+                    weighted_tai += 1.0
+                elif next_result == 'XIU':
+                    xiu_count += 1
+                    weighted_xiu += 1.0
+                total_weight += 1.0
+        
+        for session in similar_matches:
+            session_id = session.get('id')
+            is_in_exact = any(s.get('id') == session_id for s in exact_matches)
+            if is_in_exact:
+                continue
+                
+            next_session = self.get_next_session(session)
+            if next_session:
+                next_result = next_session.get('resultTruyenThong', '')
+                similarity = self.calculate_similarity_score(target_dices, session.get('dices', []))
+                
+                if next_result == 'TAI':
+                    tai_count += 1
+                    weighted_tai += similarity
+                elif next_result == 'XIU':
+                    xiu_count += 1
+                    weighted_xiu += similarity
+                total_weight += similarity
+        
+        total_samples = tai_count + xiu_count
+        
+        if total_samples < min_samples or total_weight == 0:
+            return {
+                'prediction': 'NO SIGNAL',
+                'probability': 0.0,
+                'confidence': 0.0,
+                'samples': total_samples,
+                'exact_samples': len(exact_matches),
+                'similar_samples': len(similar_matches),
+                'history_size': self.total_samples,
+                'similarity_score': 0.0,
+                'last_dice': target_dices,
+                'signal': 'NO_SIGNAL'
+            }
+        
+        prob_tai = weighted_tai / total_weight if total_weight > 0 else 0.0
+        prob_xiu = weighted_xiu / total_weight if total_weight > 0 else 0.0
+        
+        sample_ratio = min(1.0, total_samples / 50)
+        similarity_avg = self.calculate_average_similarity(target_dices, all_matches)
+        stability = self.calculate_stability(all_matches)
+        
+        confidence = (sample_ratio * 0.4 + similarity_avg * 0.3 + stability * 0.3) * 100
+        
+        if stability < 0.6:
+            confidence *= 0.8
+        
+        exact_ratio = len(exact_matches) / max(1, total_samples)
+        if exact_ratio > 0.3:
+            confidence = min(100, confidence * 1.1)
+        
+        confidence = min(100, max(0, confidence))
+        
+        if prob_tai > 0.52 and confidence > 60:
+            prediction = 'TAI'
+        elif prob_xiu > 0.52 and confidence > 60:
+            prediction = 'XIU'
+        else:
+            prediction = 'CÂN NHẮC' if confidence > 50 else 'NO SIGNAL'
+        
+        return {
+            'prediction': prediction,
+            'probability': max(prob_tai, prob_xiu) * 100,
+            'confidence': round(confidence, 1),
+            'samples': total_samples,
+            'exact_samples': len(exact_matches),
+            'similar_samples': len(similar_matches),
+            'history_size': self.total_samples,
+            'similarity_score': round(similarity_avg * 100, 1),
+            'last_dice': target_dices,
+            'prob_tai': round(prob_tai * 100, 1),
+            'prob_xiu': round(prob_xiu * 100, 1),
+            'tai_count': tai_count,
+            'xiu_count': xiu_count,
+            'signal': prediction if prediction != 'NO SIGNAL' else 'NO_SIGNAL'
+        }
+    
+    def get_empty_result(self, target_session: Dict) -> Dict:
+        return {
+            'prediction': 'NO SIGNAL',
+            'probability': 0.0,
+            'confidence': 0.0,
+            'samples': 0,
+            'exact_samples': 0,
+            'similar_samples': 0,
+            'history_size': self.total_samples,
+            'similarity_score': 0.0,
+            'last_dice': target_session.get('dices', []),
+            'signal': 'NO_SIGNAL'
+        }
 
 # ======= CẤU TRÚC DỮ LIỆU =======
 def tao_cau_truc_loai():
@@ -32,598 +415,120 @@ def tao_cau_truc_loai():
             "tong_dung": 0,
             "tong_sai": 0,
             "ty_le_thang": 0
-        },
-        "hieu_suat_phuong_phap": {
-            "markov": deque(maxlen=50),
-            "fft": deque(maxlen=50),
-            "ml": deque(maxlen=50),
-            "bayes": deque(maxlen=50),
-            "pattern": deque(maxlen=50),
-            "tam_ly": deque(maxlen=50),
-            "rsi": deque(maxlen=50),
-            "macd": deque(maxlen=50),
-            "bbands": deque(maxlen=50)
         }
     }
 
-du_lieu = {
-    "md5": tao_cau_truc_loai(),
-    "hu": tao_cau_truc_loai()
-}
+du_lieu = {}
+engines = {}
+
+def khoi_tao_du_lieu():
+    global du_lieu, engines
+    du_lieu = {
+        "hu": tao_cau_truc_loai(),
+        "md5": tao_cau_truc_loai()
+    }
+    engines = {
+        "hu": DiceHistoryEngine(),
+        "md5": DiceHistoryEngine()
+    }
+
+khoi_tao_du_lieu()
 
 # ======= LẤY DỮ LIỆU =======
 def lay_toan_bo_lich_su(url):
-    for attempt in range(3):
+    """Lấy dữ liệu từ API với Authorization Bearer Token"""
+    config = GAME_CONFIG[current_game]
+    headers = config.get('headers', {})
+    
+    logging.info(f"🔑 Đang gọi API: {url[:60]}...")
+    
+    for attempt in range(5):
         try:
-            r = requests.get(url, timeout=10)
-            r.raise_for_status()
-            data = r.json()
-            if 'list' in data and len(data['list']) > 0:
-                return data['list']
-        except Exception as e:
-            if attempt < 2:
-                time.sleep(1)
+            r = requests.get(url, timeout=30, headers=headers, verify=False)
+            
+            if r.status_code == 200:
+                data = r.json()
+                if 'list' in data and len(data['list']) > 0:
+                    logging.info(f"✅ Lấy dữ liệu thành công: {len(data['list'])} phiên")
+                    return data['list']
+                else:
+                    logging.warning(f"⚠️ API trả về danh sách rỗng")
+            elif r.status_code == 403:
+                logging.error(f"❌ Lỗi 403 - Token hết hạn!")
+                break
+            elif r.status_code == 429:
+                logging.warning(f"⚠️ Rate limit (429), chờ 10s...")
+                time.sleep(10)
             else:
-                logging.error(f"Lỗi lấy dữ liệu từ {url}: {e}")
-    return []
+                logging.warning(f"⚠️ Status code: {r.status_code}")
+                
+        except requests.exceptions.Timeout:
+            logging.warning(f"Attempt {attempt+1}/5: Timeout")
+            if attempt < 4:
+                time.sleep(5)
+        except requests.exceptions.RequestException as e:
+            logging.warning(f"Attempt {attempt+1}/5: {str(e)[:80]}")
+            if attempt < 4:
+                time.sleep(3)
+        except Exception as e:
+            logging.error(f"Lỗi: {e}")
+            if attempt < 4:
+                time.sleep(3)
+    
+    # Nếu thất bại, trả về dữ liệu mẫu
+    logging.warning("⚠️ Sử dụng dữ liệu mẫu")
+    return tao_du_lieu_mau()
 
-# ======= CÁC CHỈ BÁO KỸ THUẬT =======
-def tinh_rsi(mang, period=14):
-    """Tính RSI (Relative Strength Index)"""
-    if len(mang) < period + 1:
-        return 50
-    
-    gains = []
-    losses = []
-    
-    for i in range(1, len(mang)):
-        diff = mang[i] - mang[i-1]
-        if diff >= 0:
-            gains.append(diff)
-            losses.append(0)
-        else:
-            gains.append(0)
-            losses.append(abs(diff))
-    
-    avg_gain = sum(gains[-period:]) / period if len(gains) >= period else sum(gains) / len(gains) if gains else 0
-    avg_loss = sum(losses[-period:]) / period if len(losses) >= period else sum(losses) / len(losses) if losses else 0
-    
-    if avg_loss == 0:
-        return 100
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+def tao_du_lieu_mau():
+    """Tạo dữ liệu mẫu để test"""
+    import random
+    sample_data = []
+    results = ['TAI', 'XIU']
+    for i in range(50):
+        dices = [random.randint(1, 6) for _ in range(3)]
+        point = sum(dices)
+        result = 'TAI' if point >= 11 else 'XIU'
+        sample_data.append({
+            'id': i + 1,
+            'dices': dices,
+            'point': point,
+            'resultTruyenThong': result
+        })
+    return sample_data
 
-def tinh_macd(mang, fast=12, slow=26, signal=9):
-    """Tính MACD đơn giản"""
-    if len(mang) < slow + signal:
-        return 0
-    
-    def ema(data, period):
-        if len(data) < period:
-            return sum(data) / len(data) if len(data) > 0 else 0
-        multiplier = 2 / (period + 1)
-        ema_val = sum(data[:period]) / period
-        for val in data[period:]:
-            ema_val = (val - ema_val) * multiplier + ema_val
-        return ema_val
-    
-    fast_ema = ema(mang, fast)
-    slow_ema = ema(mang, slow)
-    macd_line = fast_ema - slow_ema
-    
-    return macd_line
-
-def tinh_bbands(mang, period=20):
-    """Tính Bollinger Bands"""
-    if len(mang) < period:
-        return 50
-    
-    last_values = mang[-period:]
-    mean = statistics.mean(last_values)
-    std = statistics.stdev(last_values) if len(last_values) > 1 else 0.1
-    
-    current = mang[-1]
-    if std == 0:
-        return 50
-    
-    upper = mean + 2 * std
-    lower = mean - 2 * std
-    
-    if current >= upper:
-        return 100
-    elif current <= lower:
-        return 0
-    else:
-        return ((current - lower) / (upper - lower)) * 100
-
-# ======= 9 PHƯƠNG PHÁP PHÂN TÍCH =======
-def phan_tich_9_phuong_phap(danh_sach, loai=""):
-    """
-    9 PHƯƠNG PHÁP PHÂN TÍCH - CẢI TIẾN CHO MD5
-    Thêm RSI, MACD, Bollinger Bands
-    """
-    if not danh_sach or len(danh_sach) < 15:
+# ======= PHÂN TÍCH =======
+def phan_tich_voi_engine(danh_sach, loai):
+    if not danh_sach or len(danh_sach) < 5:
         return tao_du_doan_mac_dinh(danh_sach, loai)
     
+    engine = engines.get(loai)
+    if not engine:
+        return tao_du_doan_mac_dinh(danh_sach, loai)
+    
+    if engine.total_samples != len(danh_sach):
+        engine.build_index(danh_sach)
+    
     van_hien_tai = danh_sach[0]
-    lich_su = danh_sach[1:]
-    
-    ket_qua = [p['resultTruyenThong'] for p in lich_su]
-    diem = [p['point'] for p in lich_su]
-    tong_van = len(ket_qua)
-    
-    # Chuyển đổi sang số: 1 = TÀI, 0 = XỈU
-    mang_so = [1 if k == 'TAI' else 0 for k in ket_qua]
-    
-    # ============================================================
-    # PHƯƠNG PHÁP 1: CHUỖI MARKOV BẬC 3
-    # ============================================================
-    def markov_bac_3_can_bang(mang):
-        if len(mang) < 5:
-            return 0.5
-        
-        pattern = tuple(mang[:3])
-        dem_tai = 0
-        dem_xiu = 0
-        
-        for i in range(len(mang) - 3):
-            if tuple(mang[i:i+3]) == pattern:
-                if i + 3 < len(mang):
-                    if mang[i+3] == 1:
-                        dem_tai += 1
-                    else:
-                        dem_xiu += 1
-        
-        tong = dem_tai + dem_xiu
-        if tong > 0:
-            return dem_tai / tong
-        return 0.5
-    
-    p_markov = markov_bac_3_can_bang(mang_so)
-    
-    # ============================================================
-    # PHƯƠNG PHÁP 2: PHÂN TÍCH CHU KỲ
-    # ============================================================
-    def phat_hien_chu_ky_can_bang(mang):
-        if len(mang) < 15:
-            return 0.5
-        
-        chu_ky_tot_nhat = 2
-        do_chinh_xac_cao_nhat = 0
-        
-        for chu_ky in range(2, min(11, len(mang)//2)):
-            dung = 0
-            tong = 0
-            for i in range(len(mang) - chu_ky):
-                if mang[i] == mang[i + chu_ky]:
-                    dung += 1
-                tong += 1
-            
-            do_chinh_xac = dung / tong if tong > 0 else 0
-            if do_chinh_xac > do_chinh_xac_cao_nhat:
-                do_chinh_xac_cao_nhat = do_chinh_xac
-                chu_ky_tot_nhat = chu_ky
-        
-        if do_chinh_xac_cao_nhat > 0.55:
-            vi_tri = len(mang) % chu_ky_tot_nhat
-            if vi_tri < len(mang):
-                return mang[vi_tri]
-        
-        return 0.5
-    
-    p_chu_ky = phat_hien_chu_ky_can_bang(mang_so)
-    
-    # ============================================================
-    # PHƯƠNG PHÁP 3: MACHINE LEARNING
-    # ============================================================
-    def ml_don_gian_can_bang(mang, diem):
-        if len(mang) < 15:
-            return 0.5
-        
-        features = []
-        labels = []
-        
-        for i in range(len(mang) - 5):
-            f = [
-                sum(mang[i:i+5]) / 5,
-                sum(mang[max(0,i-5):i+1]) / min(6, i+1),
-                diem[i] / 18 if i < len(diem) else 0.5,
-                statistics.mean(mang[max(0,i-10):i+1]) if i >= 5 else 0.5
-            ]
-            features.append(f)
-            labels.append(mang[i+5])
-        
-        if len(features) < 5:
-            return 0.5
-        
-        def hoi_quy(X, y):
-            n = len(X)
-            X_mean = [sum(x[j] for x in X)/n for j in range(4)]
-            y_mean = sum(y)/n
-            
-            tu_so = [0, 0, 0, 0]
-            mau_so = [0, 0, 0, 0]
-            
-            for i in range(n):
-                for j in range(4):
-                    tu_so[j] += (X[i][j] - X_mean[j]) * (y[i] - y_mean)
-                    mau_so[j] += (X[i][j] - X_mean[j]) ** 2
-            
-            he_so = [tu_so[j] / (mau_so[j] + 0.001) for j in range(4)]
-            intercept = y_mean - sum(he_so[j] * X_mean[j] for j in range(4))
-            
-            return he_so, intercept
-        
-        he_so, intercept = hoi_quy(features, labels)
-        
-        feature_moi = [
-            sum(mang[-5:]) / 5,
-            sum(mang[-6:]) / 6,
-            diem[0] / 18 if diem else 0.5,
-            statistics.mean(mang[-10:]) if len(mang) >= 10 else 0.5
-        ]
-        
-        du_doan = intercept + sum(he_so[j] * feature_moi[j] for j in range(4))
-        return max(0.1, min(0.9, du_doan))
-    
-    p_ml = ml_don_gian_can_bang(mang_so, diem)
-    
-    # ============================================================
-    # PHƯƠNG PHÁP 4: BAYESIAN ĐIỂM SỐ
-    # ============================================================
-    def bayesian_can_bang(diem, ket_qua):
-        if len(diem) < 10:
-            return 0.5
-        
-        diem_tai = [d for d, k in zip(diem, ket_qua) if k == 'TAI']
-        diem_xiu = [d for d, k in zip(diem, ket_qua) if k == 'XIU']
-        
-        if not diem_tai or not diem_xiu:
-            return 0.5
-        
-        tb_tai = statistics.mean(diem_tai)
-        tb_xiu = statistics.mean(diem_xiu)
-        std_tai = statistics.stdev(diem_tai) if len(diem_tai) > 1 else 1
-        std_xiu = statistics.stdev(diem_xiu) if len(diem_xiu) > 1 else 1
-        
-        p_prior_tai = len(diem_tai) / len(diem)
-        p_prior_xiu = len(diem_xiu) / len(diem)
-        
-        diem_hien_tai = diem[0] if diem else 10.5
-        
-        def normal_pdf(x, mean, std):
-            return (1/(std * math.sqrt(2*math.pi))) * math.exp(-0.5*((x-mean)/std)**2)
-        
-        likelihood_tai = normal_pdf(diem_hien_tai, tb_tai, std_tai)
-        likelihood_xiu = normal_pdf(diem_hien_tai, tb_xiu, std_xiu)
-        
-        posterior_tai = likelihood_tai * p_prior_tai
-        posterior_xiu = likelihood_xiu * p_prior_xiu
-        
-        tong = posterior_tai + posterior_xiu
-        if tong > 0:
-            return posterior_tai / tong
-        return 0.5
-    
-    p_bayes = bayesian_can_bang(diem, ket_qua)
-    
-    # ============================================================
-    # PHƯƠNG PHÁP 5: PATTERN MATCHING
-    # ============================================================
-    def pattern_matching_can_bang(mang, window=5):
-        if len(mang) < window * 2:
-            return 0.5
-        
-        pattern_hien_tai = mang[:window]
-        ket_qua_pattern = []
-        
-        for i in range(len(mang) - window):
-            pattern_cu = mang[i:i+window]
-            khop = sum(1 for a, b in zip(pattern_hien_tai, pattern_cu) if a == b)
-            ty_le_khop = khop / window
-            
-            if ty_le_khop >= 0.6 and i + window < len(mang):
-                ket_qua_pattern.append((ty_le_khop, mang[i+window]))
-        
-        if ket_qua_pattern:
-            tong_trong_so = sum(k[0] for k in ket_qua_pattern)
-            if tong_trong_so > 0:
-                du_doan = sum(k[0] * k[1] for k in ket_qua_pattern) / tong_trong_so
-                return du_doan
-        
-        return 0.5
-    
-    p_pattern = pattern_matching_can_bang(mang_so)
-    
-    # ============================================================
-    # PHƯƠNG PHÁP 6: TÂM LÝ ĐÁM ĐÔNG
-    # ============================================================
-    def tam_ly_dam_dong_can_bang(mang):
-        if len(mang) < 10:
-            return 0.5
-        
-        chuoi_hien_tai = 1
-        for i in range(1, len(mang)):
-            if mang[i] == mang[0]:
-                chuoi_hien_tai += 1
-            else:
-                break
-        
-        tat_ca_chuoi = []
-        chuoi_tam = 1
-        for i in range(1, len(mang)):
-            if mang[i] == mang[i-1]:
-                chuoi_tam += 1
-            else:
-                tat_ca_chuoi.append(chuoi_tam)
-                chuoi_tam = 1
-        tat_ca_chuoi.append(chuoi_tam)
-        
-        dem_dao_chieu = 0
-        dem_khong_dao = 0
-        vi_tri = 0
-        
-        for chieu_dai in tat_ca_chuoi[:-1]:
-            if chieu_dai >= 4:
-                if vi_tri + chieu_dai < len(mang):
-                    if mang[vi_tri + chieu_dai] != mang[vi_tri + chieu_dai - 1]:
-                        dem_dao_chieu += 1
-                    else:
-                        dem_khong_dao += 1
-            vi_tri += chieu_dai
-        
-        tong_chuoi_dai = dem_dao_chieu + dem_khong_dao
-        if tong_chuoi_dai > 0 and chuoi_hien_tai >= 4:
-            ty_le_dao_chieu = dem_dao_chieu / tong_chuoi_dai
-            if ty_le_dao_chieu > 0.5:
-                return 1 - mang[0]
-            else:
-                return mang[0]
-        
-        return 0.5
-    
-    p_tam_ly = tam_ly_dam_dong_can_bang(mang_so)
-    
-    # ============================================================
-    # PHƯƠNG PHÁP 7: RSI (CHỈ BÁO SỨC MẠNH TƯƠNG ĐỐI)
-    # ============================================================
-    def phan_tich_rsi(mang):
-        """Phân tích RSI - chỉ báo quá mua/quá bán"""
-        if len(mang) < 20:
-            return 0.5
-        
-        rsi = tinh_rsi(mang, 14)
-        
-        if rsi > 70:
-            return 0.3  # Nghiêng về XỈU
-        elif rsi < 30:
-            return 0.7  # Nghiêng về TÀI
-        else:
-            if rsi > 50:
-                return 0.55
-            else:
-                return 0.45
-    
-    p_rsi = phan_tich_rsi(mang_so)
-    
-    # ============================================================
-    # PHƯƠNG PHÁP 8: MACD
-    # ============================================================
-    def phan_tich_macd(mang):
-        """Phân tích MACD - xu hướng"""
-        if len(mang) < 30:
-            return 0.5
-        
-        macd = tinh_macd(mang, 12, 26, 9)
-        
-        if macd > 0.05:
-            return 0.6
-        elif macd < -0.05:
-            return 0.4
-        else:
-            return 0.5
-    
-    p_macd = phan_tich_macd(mang_so)
-    
-    # ============================================================
-    # PHƯƠNG PHÁP 9: BOLLINGER BANDS
-    # ============================================================
-    def phan_tich_bbands(mang):
-        """Phân tích Bollinger Bands - biến động"""
-        if len(mang) < 20:
-            return 0.5
-        
-        bb_pos = tinh_bbands(mang, 20)
-        
-        if bb_pos > 80:
-            return 0.4
-        elif bb_pos < 20:
-            return 0.6
-        else:
-            return 0.5
-    
-    p_bbands = phan_tich_bbands(mang_so)
-    
-    # ============================================================
-    # META-LEARNING (TRỌNG SỐ ĐỘNG)
-    # ============================================================
-    def tinh_trong_so_dong(loai):
-        hieu_suat = du_lieu[loai]['hieu_suat_phuong_phap'] if loai in du_lieu else None
-        
-        trong_so_mac_dinh = {
-            'markov': 0.15,
-            'fft': 0.10,
-            'ml': 0.15,
-            'bayes': 0.10,
-            'pattern': 0.10,
-            'tam_ly': 0.10,
-            'rsi': 0.15,
-            'macd': 0.10,
-            'bbands': 0.05
-        }
-        
-        if not hieu_suat:
-            return trong_so_mac_dinh
-        
-        tong_mau = sum(len(v) for v in hieu_suat.values())
-        if tong_mau < 30:
-            return trong_so_mac_dinh
-        
-        diem_phuong_phap = {}
-        for ten, lich_su in hieu_suat.items():
-            if len(lich_su) > 0:
-                ty_le_dung = sum(1 for x in lich_su if x) / len(lich_su)
-                he_so_tin_cay = min(1, len(lich_su) / 20)
-                diem_phuong_phap[ten] = ty_le_dung * he_so_tin_cay
-            else:
-                diem_phuong_phap[ten] = 0.5
-        
-        tong_diem = sum(diem_phuong_phap.values())
-        if tong_diem > 0:
-            trong_so = {k: v/tong_diem for k, v in diem_phuong_phap.items()}
-            return trong_so
-        
-        return trong_so_mac_dinh
-    
-    w = tinh_trong_so_dong(loai)
-    
-    # ============================================================
-    # TỔNG HỢP 9 PHƯƠNG PHÁP
-    # ============================================================
-    p_tai = (
-        p_markov * w.get('markov', 0.15) +
-        p_chu_ky * w.get('fft', 0.10) +
-        p_ml * w.get('ml', 0.15) +
-        p_bayes * w.get('bayes', 0.10) +
-        p_pattern * w.get('pattern', 0.10) +
-        p_tam_ly * w.get('tam_ly', 0.10) +
-        p_rsi * w.get('rsi', 0.15) +
-        p_macd * w.get('macd', 0.10) +
-        p_bbands * w.get('bbands', 0.05)
-    )
-    
-    p_tai = max(0.05, min(0.95, p_tai))
-    p_xiu = 1 - p_tai
-    
-    # ============================================================
-    # QUYẾT ĐỊNH CUỐI CÙNG - TĂNG NGƯỠNG CHO MD5
-    # ============================================================
-    if loai == 'md5':
-        nguong = 0.58
-        nguong_can_nhac = 0.52
-    else:
-        nguong = 0.53
-        nguong_can_nhac = 0.50
-    
-    chenh_lech = abs(p_tai - 0.5)
-    do_tin_cay_co_so = min(95, 25 + chenh_lech * 300 + (tong_van / 20))
-    
-    # Kiểm tra tỉ lệ thắng gần đây cho MD5
-    if loai == 'md5':
-        lich_su_gan_day = list(du_lieu[loai]['lich_su_dung_sai'])[-20:]
-        if len(lich_su_gan_day) >= 10:
-            ty_le_gan_day = sum(1 for x in lich_su_gan_day if x['dung']) / len(lich_su_gan_day)
-            if ty_le_gan_day < 0.4:
-                nguong = max(nguong, 0.62)
-                do_tin_cay_co_so = max(10, do_tin_cay_co_so - 20)
-    
-    if p_tai >= nguong:
-        khuyen = 'TAI'
-        do_tin = 'Cao' if p_tai >= 0.65 else 'Trung bình'
-    elif p_xiu >= nguong:
-        khuyen = 'XIU'
-        do_tin = 'Cao' if p_xiu >= 0.65 else 'Trung bình'
-    elif chenh_lech < nguong_can_nhac:
-        khuyen = 'CAN_NHAC'
-        do_tin = 'Thap'
-    else:
-        khuyen = 'THAN_TRONG'
-        do_tin = 'Thap'
-    
-    # ============================================================
-    # TẠO PHÂN TÍCH CHI TIẾT
-    # ============================================================
-    chuoi = [van_hien_tai['resultTruyenThong']] + ket_qua
-    chuoi_hien_tai = 1
-    for i in range(1, len(chuoi)):
-        if chuoi[i] == chuoi[i-1]:
-            chuoi_hien_tai += 1
-        else:
-            break
-    
-    so_tai = ket_qua.count('TAI')
-    so_xiu = ket_qua.count('XIU')
-    
-    cac_pp = [
-        ('Markov Bậc 3', p_markov, w.get('markov', 0.15)),
-        ('Phân Tích Chu Kỳ', p_chu_ky, w.get('fft', 0.10)),
-        ('Machine Learning', p_ml, w.get('ml', 0.15)),
-        ('Bayesian Điểm Số', p_bayes, w.get('bayes', 0.10)),
-        ('Pattern Matching', p_pattern, w.get('pattern', 0.10)),
-        ('Tâm Lý Đám Đông', p_tam_ly, w.get('tam_ly', 0.10)),
-        ('RSI (Sức mạnh)', p_rsi, w.get('rsi', 0.15)),
-        ('MACD (Xu hướng)', p_macd, w.get('macd', 0.10)),
-        ('Bollinger Bands', p_bbands, w.get('bbands', 0.05))
-    ]
-    
-    pp_manh_nhat = max(cac_pp, key=lambda x: abs(x[1] - 0.5))
-    
-    phan_tich = f"""
-PHAN TICH 9 PHUONG PHAP - {loai.upper()}
-Du lieu: {tong_van} van
-
-VAN HIEN TAI: {van_hien_tai['resultTruyenThong']} | Diem: {van_hien_tai['point']}
-CHUOI: {chuoi_hien_tai} van {van_hien_tai['resultTruyenThong']} lien tiep
-
-------------------------------------------------------------
-THONG KE TONG THE:
-- TAI: {so_tai} van ({so_tai/tong_van*100:.1f}%)
-- XIU: {so_xiu} van ({so_xiu/tong_van*100:.1f}%)
-- Chenh lech: {abs(so_tai-so_xiu)} van
-
-------------------------------------------------------------
-9 PHUONG PHAP PHAN TICH:
-------------------------------------------------------------
-"""
-    for i, (ten, p, w) in enumerate(cac_pp, 1):
-        phan_tich += f"{i}. {ten:<20} (w={w:.0%}): TAI={p*100:.1f}% | XIU={(1-p)*100:.1f}%\n"
-    
-    phan_tich += f"""
-------------------------------------------------------------
-KET QUA TONG HOP:
-- XAC SUAT TAI: {p_tai*100:.2f}%
-- XAC SUAT XIU: {p_xiu*100:.2f}%
-- NGUONG QUYET DINH: {nguong*100:.1f}%
-- DO TIN CAY: {do_tin_cay_co_so:.0f}%
-
-KHUYEN NGHI: {khuyen} ({do_tin})
-"""
+    result = engine.analyze(van_hien_tai)
     
     return {
-        'khuyen_nghi': khuyen,
-        'xac_suat_tai': round(p_tai, 4),
-        'xac_suat_xiu': round(p_xiu, 4),
-        'do_tin_cay': do_tin,
-        'do_tin_cay_so': round(do_tin_cay_co_so, 1),
-        'phan_tich': phan_tich,
+        'khuyen_nghi': result['prediction'],
+        'xac_suat_tai': result.get('prob_tai', 0) / 100,
+        'xac_suat_xiu': result.get('prob_xiu', 0) / 100,
+        'do_tin_cay': 'Cao' if result['confidence'] > 75 else 'Trung bình' if result['confidence'] > 50 else 'Thấp',
+        'do_tin_cay_so': result['confidence'],
         'van_gan_nhat': van_hien_tai,
-        'chieu_dai_chuoi': chuoi_hien_tai,
-        'ket_qua_hien_tai': van_hien_tai['resultTruyenThong'],
-        'tong_so_van': tong_van,
-        'so_tai': so_tai,
-        'so_xiu': so_xiu,
-        'p_markov': p_markov,
-        'p_chu_ky': p_chu_ky,
-        'p_ml': p_ml,
-        'p_bayes': p_bayes,
-        'p_pattern': p_pattern,
-        'p_tam_ly': p_tam_ly,
-        'p_rsi': p_rsi,
-        'p_macd': p_macd,
-        'p_bbands': p_bbands,
-        'trong_so': w,
-        'nguong': nguong
+        'ket_qua_hien_tai': van_hien_tai.get('resultTruyenThong', ''),
+        'tong_so_van': result['history_size'],
+        'so_tai': result.get('tai_count', 0),
+        'so_xiu': result.get('xiu_count', 0),
+        'chieu_dai_chuoi': 0,
+        'exact_samples': result['exact_samples'],
+        'similar_samples': result['similar_samples'],
+        'similarity_score': result['similarity_score'],
+        'samples': result['samples'],
+        'last_dice': result.get('last_dice', []),
+        'signal': result.get('signal', 'NO_SIGNAL')
     }
 
 def tao_du_doan_mac_dinh(danh_sach, loai=""):
@@ -633,53 +538,22 @@ def tao_du_doan_mac_dinh(danh_sach, loai=""):
         'xac_suat_tai': 0.5,
         'xac_suat_xiu': 0.5,
         'do_tin_cay': 'Thap',
-        'do_tin_cay_so': 10,
-        'phan_tich': f'Dang thu thap du lieu cho {loai}... Can it nhat 15 van.',
+        'do_tin_cay_so': 0,
         'van_gan_nhat': van_gan,
-        'chieu_dai_chuoi': 0,
-        'ket_qua_hien_tai': van_gan['resultTruyenThong'] if van_gan else None,
+        'ket_qua_hien_tai': van_gan.get('resultTruyenThong') if van_gan else None,
         'tong_so_van': len(danh_sach),
         'so_tai': 0,
         'so_xiu': 0,
-        'p_markov': 0.5, 
-        'p_chu_ky': 0.5, 
-        'p_ml': 0.5,
-        'p_bayes': 0.5, 
-        'p_pattern': 0.5, 
-        'p_tam_ly': 0.5,
-        'p_rsi': 0.5,
-        'p_macd': 0.5,
-        'p_bbands': 0.5,
-        'trong_so': {'markov':0.15, 'fft':0.10, 'ml':0.15, 'bayes':0.10, 
-                     'pattern':0.10, 'tam_ly':0.10, 'rsi':0.15, 'macd':0.10, 'bbands':0.05},
-        'nguong': 0.58
+        'chieu_dai_chuoi': 0,
+        'exact_samples': 0,
+        'similar_samples': 0,
+        'similarity_score': 0,
+        'samples': 0,
+        'last_dice': [],
+        'signal': 'NO_SIGNAL'
     }
 
-# ======= CẬP NHẬT HIỆU SUẤT =======
-def cap_nhat_hieu_suat(du_doan, ket_qua_thuc, loai):
-    if not du_doan or ket_qua_thuc not in ['TAI', 'XIU']:
-        return
-    
-    ket_qua_so = 1 if ket_qua_thuc == 'TAI' else 0
-    hieu_suat = du_lieu[loai]['hieu_suat_phuong_phap']
-    
-    methods = [
-        ('markov', du_doan['p_markov']),
-        ('fft', du_doan['p_chu_ky']),
-        ('ml', du_doan['p_ml']),
-        ('bayes', du_doan['p_bayes']),
-        ('pattern', du_doan['p_pattern']),
-        ('tam_ly', du_doan['p_tam_ly']),
-        ('rsi', du_doan.get('p_rsi', 0.5)),
-        ('macd', du_doan.get('p_macd', 0.5)),
-        ('bbands', du_doan.get('p_bbands', 0.5))
-    ]
-    
-    for name, p in methods:
-        du_doan_pp = 1 if p >= 0.5 else 0
-        hieu_suat[name].append(du_doan_pp == ket_qua_so)
-
-# ======= HÀM ĐỊNH DẠNG XÚC XẮC =======
+# ======= HÀM ĐỊNH DẠNG =======
 def dinh_dang_xuc_xac(van):
     if not van:
         return ''
@@ -691,23 +565,24 @@ def dinh_dang_xuc_xac(van):
 # ======= CẬP NHẬT DỮ LIỆU =======
 def cap_nhat_loai(loai, url):
     data = du_lieu[loai]
+    engine = engines[loai]
     
     while True:
         try:
             danh_sach = lay_toan_bo_lich_su(url)
             if not danh_sach:
-                logging.warning(f"⚠️ {loai} - Không lấy được dữ liệu")
-                time.sleep(3)
+                time.sleep(5)
                 continue
             
             data['toan_bo_lich_su'] = danh_sach
             van_gan = danh_sach[0]
             van_id = van_gan.get('id')
             
+            engine.build_index(danh_sach)
+            
             if data['lan_cap_nhat_truoc'] is None or data['lan_cap_nhat_truoc'] != van_id:
-                # Cập nhật lịch sử dự đoán trước
                 if data['du_doan_van_tiep'] and data['van_gan_nhat']:
-                    du_doan_cu = data['du_doan_van_tiep']['khuyen_nghi']
+                    du_doan_cu = data['du_doan_van_tiep'].get('khuyen_nghi')
                     ket_qua_thuc = van_gan.get('resultTruyenThong')
                     
                     if du_doan_cu in ['TAI', 'XIU'] and ket_qua_thuc:
@@ -732,61 +607,84 @@ def cap_nhat_loai(loai, url):
                             data['thong_ke_tong_hop']['ty_le_thang'] = round(
                                 data['thong_ke_tong_hop']['tong_dung'] / tong * 100, 1
                             )
-                        
-                        cap_nhat_hieu_suat(data['du_doan_van_tiep'], ket_qua_thuc, loai)
                 
-                # Cập nhật dự đoán mới
                 data['van_gan_nhat'] = van_gan
-                data['du_doan_van_tiep'] = phan_tich_9_phuong_phap(danh_sach, loai)
+                data['du_doan_van_tiep'] = phan_tich_voi_engine(danh_sach, loai)
                 data['lan_cap_nhat_truoc'] = van_id
                 data['thoi_gian_cap_nhat'] = datetime.now().strftime('%H:%M:%S')
                 
-                logging.info(f"✅ {loai} - Cập nhật thành công | ID: {van_id} | Result: {van_gan.get('resultTruyenThong')}")
-                
         except Exception as e:
-            logging.error(f"❌ Lỗi cập nhật {loai}: {e}")
+            logging.error(f"Lỗi cập nhật {loai}: {e}")
         
-        time.sleep(3)
+        time.sleep(5)
 
-# ======= KHỞI TẠO DỮ LIỆU BAN ĐẦU =======
-def init_data():
-    """Khởi tạo dữ liệu ngay khi app start - QUAN TRỌNG CHO RENDER"""
-    logging.info("🔄 Đang khởi tạo dữ liệu ban đầu...")
+def start_updater(game_key):
+    global current_game
+    current_game = game_key
+    config = GAME_CONFIG[game_key]
     
-    for loai, url in [('md5', URL_MD5), ('hu', URL_HU)]:
-        try:
-            danh_sach = lay_toan_bo_lich_su(url)
-            if danh_sach:
-                data = du_lieu[loai]
-                data['toan_bo_lich_su'] = danh_sach
-                data['van_gan_nhat'] = danh_sach[0]
-                data['du_doan_van_tiep'] = phan_tich_9_phuong_phap(danh_sach, loai)
-                data['lan_cap_nhat_truoc'] = danh_sach[0].get('id')
-                data['thoi_gian_cap_nhat'] = datetime.now().strftime('%H:%M:%S')
-                logging.info(f"✅ Khởi tạo {loai} thành công với {len(danh_sach)} ván")
-                logging.info(f"   🎯 Dự đoán: {data['du_doan_van_tiep']['khuyen_nghi']}")
-            else:
-                logging.warning(f"⚠️ Không lấy được dữ liệu cho {loai}")
-        except Exception as e:
-            logging.error(f"❌ Lỗi khởi tạo {loai}: {e}")
+    khoi_tao_du_lieu()
+    
+    threading.Thread(target=cap_nhat_loai, args=('hu', config['hu_url']), daemon=True).start()
+    threading.Thread(target=cap_nhat_loai, args=('md5', config['md5_url']), daemon=True).start()
+    logging.info(f"🔄 Đã chuyển sang game: {config['name']}")
 
-# Gọi khởi tạo dữ liệu ngay khi import
-init_data()
+# Khởi động với LC79
+start_updater('lc79')
 
-# ======= KHỞI ĐỘNG THREAD =======
-# Dùng thread để cập nhật liên tục
-threading.Thread(target=cap_nhat_loai, args=('md5', URL_MD5), daemon=True).start()
-threading.Thread(target=cap_nhat_loai, args=('hu', URL_HU), daemon=True).start()
-logging.info("🚀 Background threads đã khởi động")
+# ======= ROUTES =======
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE, 
+                                 du_lieu=du_lieu, 
+                                 game_config=GAME_CONFIG,
+                                 current_game=current_game)
 
-# ======= HTML TEMPLATE =======
+@app.route('/api/du_lieu/<loai>')
+def api_du_lieu(loai):
+    return jsonify(du_lieu.get(loai, {}).get('du_doan_van_tiep'))
+
+@app.route('/api/all')
+def api_all():
+    result = {}
+    for loai in ['hu', 'md5']:
+        data = du_lieu[loai]
+        result[loai] = {
+            'du_doan_van_tiep': data['du_doan_van_tiep'],
+            'van_gan_nhat': data['van_gan_nhat'],
+            'thong_ke_tong_hop': data['thong_ke_tong_hop'],
+            'thoi_gian_cap_nhat': data['thoi_gian_cap_nhat'],
+            'lich_su_dung_sai': list(data['lich_su_dung_sai'])[-30:]
+        }
+    return jsonify(result)
+
+@app.route('/api/switch_game', methods=['POST'])
+def switch_game():
+    data = request.get_json()
+    game_key = data.get('game')
+    
+    if game_key not in GAME_CONFIG:
+        return jsonify({'error': 'Game không tồn tại'}), 400
+    
+    if not GAME_CONFIG[game_key]['active']:
+        return jsonify({'error': 'Game đang bảo trì'}), 400
+    
+    start_updater(game_key)
+    
+    return jsonify({
+        'success': True,
+        'game': game_key,
+        'message': f'Đã chuyển sang {GAME_CONFIG[game_key]["name"]}'
+    })
+
+# ======= HTML TEMPLATE (giữ nguyên) =======
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="vi">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>NEXUS · Tài Xỉu Dual Intelligence</title>
+<title>NEXUS · Tài Xỉu Dice History</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -855,6 +753,28 @@ body{
 .hud-item{display:flex; flex-direction:column; align-items:flex-end; gap:2px}
 .hud-label{font-size:.62em; color:var(--text-faint); text-transform:uppercase; letter-spacing:1px}
 .hud-value{font-size:.84em; font-weight:600; color:var(--text)}
+
+.game-selector {
+  display:flex; align-items:center; gap:10px;
+  background:var(--glass-2); border:1px solid var(--border);
+  border-radius:var(--radius-sm); padding:4px;
+}
+.game-btn {
+  padding:6px 16px; border-radius:8px; border:none;
+  background:transparent; color:var(--text-dim);
+  font-family:'Inter',sans-serif; font-weight:600; font-size:.8em;
+  cursor:pointer; transition:all .25s;
+}
+.game-btn:hover {
+  color:var(--text); background:rgba(255,255,255,.05);
+}
+.game-btn.active {
+  color:#fff; background:var(--accent, var(--purple));
+  box-shadow:0 0 20px rgba(139,108,255,.3);
+}
+.game-btn.lc79.active { --accent:#ff6b35; }
+.game-btn.betvip.active { --accent:#8b6cff; }
+
 .bet-btn{
   display:inline-flex; align-items:center; gap:8px;
   padding:8px 20px; border-radius:99px;
@@ -892,6 +812,12 @@ body{
 .dual-grid{display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-bottom:18px}
 @media(max-width:860px){.dual-grid{grid-template-columns:1fr}}
 
+#hu-container .gcard { border-color:rgba(255,140,66,.3); }
+#hu-container .eyebrow:first-child { color:var(--orange); }
+
+#md5-container .gcard { border-color:rgba(59,158,255,.3); }
+#md5-container .eyebrow:first-child { color:var(--blue); }
+
 .hero{padding:8px 22px 26px; position:relative; z-index:1}
 .hero-top{display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; color:var(--text-dim); font-size:.82em; margin-bottom:6px}
 .hero-top b{color:var(--text); font-weight:600}
@@ -924,21 +850,14 @@ body{
 .metric-num{font-family:'JetBrains Mono',monospace; font-weight:700; font-size:1em; color:var(--text)}
 .metric-lbl{font-size:.58em; color:var(--text-faint); text-transform:uppercase; letter-spacing:.6px; margin-top:3px}
 
-.model-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:10px; padding:16px 22px 20px}
-@media(max-width:500px){.model-grid{grid-template-columns:1fr 1fr}}
-.model-card{
+.engine-stats{display:grid; grid-template-columns:repeat(4,1fr); gap:10px; padding:16px 22px 20px}
+@media(max-width:600px){.engine-stats{grid-template-columns:1fr 1fr}}
+.engine-stat{
   background:var(--glass-2); border:1px solid var(--border); border-radius:var(--radius-sm);
-  padding:12px; position:relative; overflow:hidden; transition:transform .3s, border-color .3s;
+  padding:14px; display:flex; flex-direction:column; gap:3px;
 }
-.model-card:hover{transform:translateY(-2px); border-color:var(--border-strong)}
-.model-card::after{content:''; position:absolute; top:0; left:0; width:100%; height:2px; background:var(--accent, var(--blue))}
-.model-top{display:flex; justify-content:space-between; align-items:center; margin-bottom:8px}
-.model-name{font-size:.7em; font-weight:600; color:var(--text)}
-.model-weight{font-size:.58em; color:var(--text-faint); font-family:'JetBrains Mono',monospace}
-.model-pct{font-family:'JetBrains Mono',monospace; font-weight:700; font-size:1.1em; line-height:1}
-.model-side{font-size:.58em; color:var(--text-faint); margin-top:1px; text-transform:uppercase; letter-spacing:.5px}
-.model-bar-track{height:3px; border-radius:3px; background:rgba(255,255,255,.07); margin-top:8px; overflow:hidden}
-.model-bar-fill{height:100%; border-radius:3px; transition:width .8s cubic-bezier(.22,1,.36,1)}
+.engine-stat .v{font-family:'JetBrains Mono',monospace; font-weight:700; font-size:1.2em}
+.engine-stat .l{font-size:.62em; color:var(--text-faint); text-transform:uppercase; letter-spacing:.6px}
 
 .stats-grid{display:grid; grid-template-columns:repeat(4,1fr); gap:10px; padding:16px 22px 20px}
 @media(max-width:600px){.stats-grid{grid-template-columns:1fr 1fr}}
@@ -994,87 +913,36 @@ body{
       </div>
       <div class="brand-text">
         <div class="name">NEXUS<span style="color:var(--blue)">·</span>TX</div>
-        <div class="tag">9 phương pháp · MD5 + Hũ</div>
+        <div class="tag">admin : trần dũng</div>
+        <div class="tag">tiktok : @user111129</div>
       </div>
     </div>
     <div class="hud">
+      <div class="game-selector" id="game-selector">
+        {% for key, config in game_config.items() %}
+          {% if config.active %}
+            <button class="game-btn {{ key }} {% if key == current_game %}active{% endif %}" 
+                    data-game="{{ key }}"
+                    style="--accent: {{ config.color }}">
+              {{ config.name }}
+            </button>
+          {% endif %}
+        {% endfor %}
+      </div>
       <div class="hud-item">
         <span class="hud-label">Cập nhật</span>
         <span class="hud-value mono" id="hud-time">--:--:--</span>
       </div>
-      <a href="https://lc79.bet" target="_blank" class="bet-btn">🎲 Đặt Cược</a>
+      <a href="{{ game_config[current_game].bet_url }}" target="_blank" class="bet-btn">🎲 Đặt Cược</a>
       <div class="live-chip"><span class="live-dot"></span><span class="live-text">LIVE</span></div>
     </div>
   </header>
 
   <div class="dual-grid" id="dual-grid">
-    <!-- MD5 -->
-    <div id="md5-container">
-      <div class="gcard" style="border-color:rgba(59,158,255,.3)">
-        <div class="gcard-head">
-          <span class="eyebrow" style="color:var(--blue)">🔷 MD5</span>
-          <span class="eyebrow" style="color:var(--text-faint)">9 phương pháp · ngưỡng 58%</span>
-        </div>
-        <div class="hero" id="md5-hero">
-          <div class="hero-top">
-            <span>Ván vừa xong: <b id="md5-last-result">—</b></span>
-            <span class="dice-chip" id="md5-last-dice"><span class="die mono">—</span></span>
-          </div>
-          <div class="hero-main">
-            <div class="gauge-wrap">
-              <svg viewBox="0 0 200 200">
-                <circle class="gauge-track" cx="100" cy="100" r="85"/>
-                <circle class="gauge-fill" id="md5-gauge" cx="100" cy="100" r="85" stroke="#3b9eff" stroke-dasharray="534.07" stroke-dashoffset="267"/>
-              </svg>
-              <div class="gauge-center">
-                <span class="gauge-sub">Khuyến nghị</span>
-                <span class="gauge-call display" id="md5-call">—</span>
-                <span class="gauge-conf mono" id="md5-conf">0%</span>
-              </div>
-            </div>
-            <div class="prob-cols">
-              <div class="prob-row">
-                <div class="prob-row-top">
-                  <span class="prob-name" style="color:var(--blue)">TÀI</span>
-                  <span class="prob-pct" id="md5-pct-tai" style="color:var(--blue)">50%</span>
-                </div>
-                <div class="prob-track"><div class="prob-fill" id="md5-bar-tai" style="width:50%; background:linear-gradient(90deg,#3b9eff,#7cc1ff)"></div></div>
-              </div>
-              <div class="prob-row">
-                <div class="prob-row-top">
-                  <span class="prob-name" style="color:var(--rose)">XỈU</span>
-                  <span class="prob-pct" id="md5-pct-xiu" style="color:var(--rose)">50%</span>
-                </div>
-                <div class="prob-track"><div class="prob-fill" id="md5-bar-xiu" style="width:50%; background:linear-gradient(90deg,#ff4d6d,#ff8fa3)"></div></div>
-              </div>
-            </div>
-          </div>
-          <div class="metric-strip">
-            <div class="metric-cell"><div class="metric-num" id="md5-m-streak">0</div><div class="metric-lbl">Chuỗi</div></div>
-            <div class="metric-cell"><div class="metric-num" id="md5-m-taixiu">0–0</div><div class="metric-lbl">Tài–Xỉu</div></div>
-            <div class="metric-cell"><div class="metric-num" id="md5-m-conf">0%</div><div class="metric-lbl">Độ tin cậy</div></div>
-            <div class="metric-cell"><div class="metric-num" id="md5-m-rounds">0</div><div class="metric-lbl">Tổng ván</div></div>
-          </div>
-        </div>
-        <div class="model-grid" id="md5-models">
-          {% for name in ['Markov','Chu kỳ','ML','Bayesian','Pattern','Tâm lý','RSI','MACD','BBands'] %}
-          <div class="model-card" style="--accent:#3b9eff">
-            <div class="model-top"><span class="model-name">{{ name }}</span><span class="model-weight">w 0%</span></div>
-            <div class="model-pct" style="color:#3b9eff">50%</div>
-            <div class="model-side">nghiêng —</div>
-            <div class="model-bar-track"><div class="model-bar-fill" style="width:50%; background:#3b9eff"></div></div>
-          </div>
-          {% endfor %}
-        </div>
-      </div>
-    </div>
-
-    <!-- HŨ -->
     <div id="hu-container">
-      <div class="gcard" style="border-color:rgba(255,140,66,.3)">
+      <div class="gcard">
         <div class="gcard-head">
-          <span class="eyebrow" style="color:var(--orange)">🟠 Hũ</span>
-          <span class="eyebrow" style="color:var(--text-faint)">7 phương pháp · ngưỡng 53%</span>
+          <span class="eyebrow">🟠Tài Xỉu Hũ</span>
         </div>
         <div class="hero" id="hu-hero">
           <div class="hero-top">
@@ -1111,40 +979,89 @@ body{
             </div>
           </div>
           <div class="metric-strip">
-            <div class="metric-cell"><div class="metric-num" id="hu-m-streak">0</div><div class="metric-lbl">Chuỗi</div></div>
-            <div class="metric-cell"><div class="metric-num" id="hu-m-taixiu">0–0</div><div class="metric-lbl">Tài–Xỉu</div></div>
+            <div class="metric-cell"><div class="metric-num" id="hu-m-samples">0</div><div class="metric-lbl">Mẫu khớp</div></div>
+            <div class="metric-cell"><div class="metric-num" id="hu-m-exact">0</div><div class="metric-lbl">Khớp chính xác</div></div>
+            <div class="metric-cell"><div class="metric-num" id="hu-m-similar">0</div><div class="metric-lbl">Khớp tương đồng</div></div>
             <div class="metric-cell"><div class="metric-num" id="hu-m-conf">0%</div><div class="metric-lbl">Độ tin cậy</div></div>
-            <div class="metric-cell"><div class="metric-num" id="hu-m-rounds">0</div><div class="metric-lbl">Tổng ván</div></div>
           </div>
         </div>
-        <div class="model-grid" id="hu-models">
-          {% for name in ['Markov','Chu kỳ','ML','Bayesian','Pattern','Tâm lý','RSI','MACD','BBands'] %}
-          <div class="model-card" style="--accent:#ff8c42">
-            <div class="model-top"><span class="model-name">{{ name }}</span><span class="model-weight">w 0%</span></div>
-            <div class="model-pct" style="color:#ff8c42">50%</div>
-            <div class="model-side">nghiêng —</div>
-            <div class="model-bar-track"><div class="model-bar-fill" style="width:50%; background:#ff8c42"></div></div>
+        <div class="engine-stats" id="hu-engine">
+          <div class="engine-stat"><span class="v mono" id="hu-es-similarity" style="color:var(--orange)">0%</span><span class="l">Độ tương đồng</span></div>
+          <div class="engine-stat"><span class="v mono" id="hu-es-history">0</span><span class="l">Tổng lịch sử</span></div>
+          <div class="engine-stat"><span class="v mono" id="hu-es-taixiu">0-0</span><span class="l">Tài-Xỉu</span></div>
+          <div class="engine-stat"><span class="v mono" id="hu-es-signal">N/A</span><span class="l">Tín hiệu</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="md5-container">
+      <div class="gcard">
+        <div class="gcard-head">
+          <span class="eyebrow">🔷Tài Xỉu MD5</span>
+        </div>
+        <div class="hero" id="md5-hero">
+          <div class="hero-top">
+            <span>Ván vừa xong: <b id="md5-last-result">—</b></span>
+            <span class="dice-chip" id="md5-last-dice"><span class="die mono">—</span></span>
           </div>
-          {% endfor %}
+          <div class="hero-main">
+            <div class="gauge-wrap">
+              <svg viewBox="0 0 200 200">
+                <circle class="gauge-track" cx="100" cy="100" r="85"/>
+                <circle class="gauge-fill" id="md5-gauge" cx="100" cy="100" r="85" stroke="#3b9eff" stroke-dasharray="534.07" stroke-dashoffset="267"/>
+              </svg>
+              <div class="gauge-center">
+                <span class="gauge-sub">Khuyến nghị</span>
+                <span class="gauge-call display" id="md5-call">—</span>
+                <span class="gauge-conf mono" id="md5-conf">0%</span>
+              </div>
+            </div>
+            <div class="prob-cols">
+              <div class="prob-row">
+                <div class="prob-row-top">
+                  <span class="prob-name" style="color:var(--blue)">TÀI</span>
+                  <span class="prob-pct" id="md5-pct-tai" style="color:var(--blue)">50%</span>
+                </div>
+                <div class="prob-track"><div class="prob-fill" id="md5-bar-tai" style="width:50%; background:linear-gradient(90deg,#3b9eff,#7cc1ff)"></div></div>
+              </div>
+              <div class="prob-row">
+                <div class="prob-row-top">
+                  <span class="prob-name" style="color:var(--rose)">XỈU</span>
+                  <span class="prob-pct" id="md5-pct-xiu" style="color:var(--rose)">50%</span>
+                </div>
+                <div class="prob-track"><div class="prob-fill" id="md5-bar-xiu" style="width:50%; background:linear-gradient(90deg,#ff4d6d,#ff8fa3)"></div></div>
+              </div>
+            </div>
+          </div>
+          <div class="metric-strip">
+            <div class="metric-cell"><div class="metric-num" id="md5-m-samples">0</div><div class="metric-lbl">Mẫu khớp</div></div>
+            <div class="metric-cell"><div class="metric-num" id="md5-m-exact">0</div><div class="metric-lbl">Khớp chính xác</div></div>
+            <div class="metric-cell"><div class="metric-num" id="md5-m-similar">0</div><div class="metric-lbl">Khớp tương đồng</div></div>
+            <div class="metric-cell"><div class="metric-num" id="md5-m-conf">0%</div><div class="metric-lbl">Độ tin cậy</div></div>
+          </div>
+        </div>
+        <div class="engine-stats" id="md5-engine">
+          <div class="engine-stat"><span class="v mono" id="md5-es-similarity" style="color:var(--blue)">0%</span><span class="l">Độ tương đồng</span></div>
+          <div class="engine-stat"><span class="v mono" id="md5-es-history">0</span><span class="l">Tổng lịch sử</span></div>
+          <div class="engine-stat"><span class="v mono" id="md5-es-taixiu">0-0</span><span class="l">Tài-Xỉu</span></div>
+          <div class="engine-stat"><span class="v mono" id="md5-es-signal">N/A</span><span class="l">Tín hiệu</span></div>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- STATISTICS -->
   <div class="gcard" style="margin-bottom:18px">
     <div class="gcard-head">
       <span class="eyebrow">📊 Thống kê tổng hợp</span>
     </div>
     <div class="stats-grid" id="stats-grid">
-      <div class="stat-box"><span class="v mono" id="s-md5-winrate" style="color:var(--emerald)">0%</span><span class="l">MD5 Winrate</span></div>
       <div class="stat-box"><span class="v mono" id="s-hu-winrate" style="color:var(--emerald)">0%</span><span class="l">Hũ Winrate</span></div>
-      <div class="stat-box"><span class="v mono" id="s-md5-total">0</span><span class="l">MD5 Dự đoán</span></div>
+      <div class="stat-box"><span class="v mono" id="s-md5-winrate" style="color:var(--emerald)">0%</span><span class="l">MD5 Winrate</span></div>
       <div class="stat-box"><span class="v mono" id="s-hu-total">0</span><span class="l">Hũ Dự đoán</span></div>
+      <div class="stat-box"><span class="v mono" id="s-md5-total">0</span><span class="l">MD5 Dự đoán</span></div>
     </div>
   </div>
 
-  <!-- HISTORY -->
   <div class="gcard">
     <div class="gcard-head">
       <span class="eyebrow">📜 Lịch sử dự đoán</span>
@@ -1158,53 +1075,24 @@ body{
     </div>
   </div>
 
-  <footer class="foot">NEXUS·TX — 9 phương pháp phân tích · Dữ liệu chỉ mang tính tham khảo</footer>
+  <footer class="foot">NEXUS·TX · Dice History Retrieval Engine</footer>
 </div>
 
 <script>
 const GAUGE_CIRC = 534.07;
 
 function updateType(type, data) {
-  console.log(`🔄 Updating ${type}:`, data);
-  
-  if (!data) {
-    document.getElementById(type + '-call').textContent = '⏳ Đang khởi tạo...';
+  if (!data || data.tong_so_van < 5) {
+    document.getElementById(type + '-call').textContent = 'Đang thu thập...';
     return;
   }
   
-  const soVan = data.tong_so_van || 0;
-  
-  // Hiển thị dù chưa đủ 15 ván
-  if (soVan < 15) {
-    document.getElementById(type + '-call').textContent = `📡 Đang thu thập (${soVan}/15)`;
-    document.getElementById(type + '-m-rounds').textContent = soVan;
-    document.getElementById(type + '-conf').textContent = '0%';
-    document.getElementById(type + '-m-conf').textContent = '0%';
-    document.getElementById(type + '-pct-tai').textContent = '50%';
-    document.getElementById(type + '-pct-xiu').textContent = '50%';
-    document.getElementById(type + '-bar-tai').style.width = '50%';
-    document.getElementById(type + '-bar-xiu').style.width = '50%';
-    document.getElementById(type + '-m-streak').textContent = '0';
-    document.getElementById(type + '-m-taixiu').textContent = '0–0';
-    if (data.ket_qua_hien_tai) {
-      document.getElementById(type + '-last-result').textContent = data.ket_qua_hien_tai;
-    }
-    // Update models mặc định
-    const cards = document.getElementById(type + '-models').querySelectorAll('.model-card');
-    cards.forEach((card) => {
-      card.querySelector('.model-pct').textContent = '50%';
-      card.querySelector('.model-side').textContent = 'nghiêng —';
-      card.querySelector('.model-bar-fill').style.width = '50%';
-    });
-    return;
-  }
-  
-  // Đã có đủ dữ liệu
   const prefix = type;
   const isTai = data.khuyen_nghi === 'TAI';
   const isXiu = data.khuyen_nghi === 'XIU';
+  const isNoSignal = data.khuyen_nghi === 'NO SIGNAL' || data.khuyen_nghi === 'CHUA_DU_DU_LIEU';
   const prob = isTai ? data.xac_suat_tai : (isXiu ? data.xac_suat_xiu : 0.5);
-  const callColor = isTai ? '#3b9eff' : (isXiu ? '#ff4d6d' : '#ffb454');
+  const callColor = isTai ? '#3b9eff' : (isXiu ? '#ff4d6d' : (isNoSignal ? '#ffb454' : '#ffb454'));
   const accentColor = type === 'md5' ? '#3b9eff' : '#ff8c42';
   
   const gauge = document.getElementById(prefix + '-gauge');
@@ -1215,8 +1103,9 @@ function updateType(type, data) {
   
   const callEl = document.getElementById(prefix + '-call');
   if (callEl) {
-    callEl.textContent = data.khuyen_nghi === 'CAN_NHAC' ? '⚠️ CÂN NHẮC' : 
-                         data.khuyen_nghi === 'THAN_TRONG' ? '⚡ THẬN TRỌNG' : data.khuyen_nghi;
+    callEl.textContent = data.khuyen_nghi === 'NO SIGNAL' ? '⏸️ NO SIGNAL' : 
+                         data.khuyen_nghi === 'CHUA_DU_DU_LIEU' ? '⏳ ĐANG THU THẬP' :
+                         data.khuyen_nghi === 'CÂN NHẮC' ? '⚖️ CÂN NHẮC' : data.khuyen_nghi;
     callEl.style.color = callColor;
   }
   
@@ -1226,43 +1115,48 @@ function updateType(type, data) {
   document.getElementById(prefix + '-bar-tai').style.width = (data.xac_suat_tai * 100) + '%';
   document.getElementById(prefix + '-bar-xiu').style.width = (data.xac_suat_xiu * 100) + '%';
   
-  document.getElementById(prefix + '-m-streak').textContent = data.chieu_dai_chuoi || 0;
-  document.getElementById(prefix + '-m-taixiu').textContent = (data.so_tai || 0) + '–' + (data.so_xiu || 0);
+  document.getElementById(prefix + '-m-samples').textContent = data.samples || 0;
+  document.getElementById(prefix + '-m-exact').textContent = data.exact_samples || 0;
+  document.getElementById(prefix + '-m-similar').textContent = data.similar_samples || 0;
   document.getElementById(prefix + '-m-conf').textContent = data.do_tin_cay_so + '%';
-  document.getElementById(prefix + '-m-rounds').textContent = data.tong_so_van || 0;
+  
+  document.getElementById(prefix + '-es-similarity').textContent = (data.similarity_score || 0) + '%';
+  document.getElementById(prefix + '-es-history').textContent = data.tong_so_van || 0;
+  document.getElementById(prefix + '-es-taixiu').textContent = (data.so_tai || 0) + '-' + (data.so_xiu || 0);
+  
+  const signalEl = document.getElementById(prefix + '-es-signal');
+  if (data.signal === 'NO_SIGNAL') {
+    signalEl.textContent = '⏸️ N/A';
+    signalEl.style.color = '#ffb454';
+  } else if (data.signal === 'TAI') {
+    signalEl.textContent = '⬆️ TÀI';
+    signalEl.style.color = '#3b9eff';
+  } else if (data.signal === 'XIU') {
+    signalEl.textContent = '⬇️ XỈU';
+    signalEl.style.color = '#ff4d6d';
+  } else {
+    signalEl.textContent = data.signal || 'N/A';
+  }
+  
   document.getElementById(prefix + '-last-result').textContent = data.ket_qua_hien_tai || '—';
   
-  const modelKeys = ['p_markov', 'p_chu_ky', 'p_ml', 'p_bayes', 'p_pattern', 'p_tam_ly', 'p_rsi', 'p_macd', 'p_bbands'];
-  const weightKeys = ['markov', 'fft', 'ml', 'bayes', 'pattern', 'tam_ly', 'rsi', 'macd', 'bbands'];
-  const cards = document.getElementById(prefix + '-models').querySelectorAll('.model-card');
-  cards.forEach((card, idx) => {
-    if (idx >= modelKeys.length) return;
-    const p = data[modelKeys[idx]] || 0.5;
-    const w = data.trong_so ? data.trong_so[weightKeys[idx]] : 0.10;
-    card.querySelector('.model-pct').textContent = (p * 100).toFixed(1) + '%';
-    card.querySelector('.model-pct').style.color = p >= 0.5 ? accentColor : '#ff4d6d';
-    card.querySelector('.model-side').textContent = 'nghiêng ' + (p >= 0.5 ? 'TÀI' : 'XỈU');
-    card.querySelector('.model-weight').textContent = 'w ' + (w * 100).toFixed(0) + '%';
-    card.querySelector('.model-bar-fill').style.width = (p * 100) + '%';
-  });
-  
-  console.log(`✅ ${type} updated:`, {
-    call: data.khuyen_nghi,
-    tai: data.xac_suat_tai,
-    xiu: data.xac_suat_xiu,
-    rounds: data.tong_so_van
-  });
+  const diceContainer = document.getElementById(prefix + '-last-dice');
+  if (data.last_dice && data.last_dice.length > 0) {
+    diceContainer.innerHTML = data.last_dice.map(d => `<span class="die mono">${d}</span>`).join('');
+  } else {
+    diceContainer.innerHTML = '<span class="die mono">—</span>';
+  }
 }
 
 function updateStats(data) {
   if (!data) return;
-  document.getElementById('s-md5-winrate').textContent = (data.md5?.thong_ke_tong_hop?.ty_le_thang || 0) + '%';
   document.getElementById('s-hu-winrate').textContent = (data.hu?.thong_ke_tong_hop?.ty_le_thang || 0) + '%';
-  document.getElementById('s-md5-total').textContent = data.md5?.thong_ke_tong_hop?.tong_du_doan || 0;
+  document.getElementById('s-md5-winrate').textContent = (data.md5?.thong_ke_tong_hop?.ty_le_thang || 0) + '%';
   document.getElementById('s-hu-total').textContent = data.hu?.thong_ke_tong_hop?.tong_du_doan || 0;
+  document.getElementById('s-md5-total').textContent = data.md5?.thong_ke_tong_hop?.tong_du_doan || 0;
   
-  if (data.md5?.thoi_gian_cap_nhat || data.hu?.thoi_gian_cap_nhat) {
-    document.getElementById('hud-time').textContent = data.md5?.thoi_gian_cap_nhat || data.hu?.thoi_gian_cap_nhat || '--:--:--';
+  if (data.hu?.thoi_gian_cap_nhat || data.md5?.thoi_gian_cap_nhat) {
+    document.getElementById('hud-time').textContent = data.hu?.thoi_gian_cap_nhat || data.md5?.thoi_gian_cap_nhat || '--:--:--';
   }
 }
 
@@ -1278,7 +1172,7 @@ function renderTimeline(history) {
   wrap.innerHTML = history.slice().reverse().slice(0, 30).map(item => {
     const winColor = item.dung ? '#2bd97c' : '#ff4d6d';
     const statusIcon = item.dung ? '✅ THẮNG' : '❌ THUA';
-    const typeLabel = item.loai === 'hu' ? '🟠 HŨ' : '🔷 MD5';
+    const typeLabel = item.loai === 'hu' ? '🟠Hũ' : '🔷MD5';
     return `
       <div class="t-row">
         <div class="t-rail">
@@ -1304,78 +1198,69 @@ function renderTimeline(history) {
   document.getElementById('hist-count').textContent = history.length + ' ván';
 }
 
+document.querySelectorAll('.game-btn').forEach(btn => {
+  btn.addEventListener('click', async function() {
+    const game = this.dataset.game;
+    if (this.classList.contains('active')) return;
+    
+    try {
+      const res = await fetch('/api/switch_game', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({game: game})
+      });
+      const data = await res.json();
+      if (data.success) {
+        document.querySelectorAll('.game-btn').forEach(b => b.classList.remove('active'));
+        this.classList.add('active');
+        await fetchData();
+        const betBtn = document.querySelector('.bet-btn');
+        if (betBtn) {
+          const configs = {{ game_config|tojson }};
+          betBtn.href = configs[game].bet_url;
+        }
+        location.reload();
+      }
+    } catch(e) {
+      console.error('Switch game error:', e);
+    }
+  });
+});
+
 async function fetchData() {
   try {
     const res = await fetch('/api/all', {cache:'no-store'});
-    if (!res.ok) {
-      console.error('❌ API error:', res.status);
-      return;
-    }
+    if (!res.ok) return;
     const data = await res.json();
-    console.log('✅ Data received');
-    
-    updateType('md5', data.md5?.du_doan_van_tiep);
     updateType('hu', data.hu?.du_doan_van_tiep);
+    updateType('md5', data.md5?.du_doan_van_tiep);
     updateStats(data);
     
     const allHistory = [];
-    if (data.md5?.lich_su_dung_sai) {
-      data.md5.lich_su_dung_sai.forEach(h => { h.loai = 'md5'; allHistory.push(h); });
-    }
     if (data.hu?.lich_su_dung_sai) {
       data.hu.lich_su_dung_sai.forEach(h => { h.loai = 'hu'; allHistory.push(h); });
     }
+    if (data.md5?.lich_su_dung_sai) {
+      data.md5.lich_su_dung_sai.forEach(h => { h.loai = 'md5'; allHistory.push(h); });
+    }
     allHistory.sort((a,b) => a.thoi_gian.localeCompare(b.thoi_gian));
     renderTimeline(allHistory);
-  } catch(e) {
-    console.error('❌ Fetch error:', e);
-  }
+  } catch(e) {}
 }
 
-// Khởi tạo và cập nhật mỗi 2 giây
 fetchData();
-setInterval(fetchData, 2000);
+setInterval(fetchData, 3000);
 </script>
 </body>
 </html>
 """
 
-# ======= ROUTES =======
-@app.route('/')
-def index():
-    return render_template_string(HTML_TEMPLATE, du_lieu=du_lieu)
-
-@app.route('/api/du_lieu/<loai>')
-def api_du_lieu(loai):
-    return jsonify(du_lieu.get(loai, {}).get('du_doan_van_tiep'))
-
-@app.route('/api/all')
-def api_all():
-    result = {}
-    for loai in ['md5', 'hu']:
-        data = du_lieu[loai]
-        result[loai] = {
-            'du_doan_van_tiep': data['du_doan_van_tiep'],
-            'van_gan_nhat': data['van_gan_nhat'],
-            'thong_ke_tong_hop': data['thong_ke_tong_hop'],
-            'thoi_gian_cap_nhat': data['thoi_gian_cap_nhat'],
-            'lich_su_dung_sai': list(data['lich_su_dung_sai'])[-30:]
-        }
-    return jsonify(result)
-
-@app.route('/debug')
-def debug():
-    return jsonify({
-        'md5_du_doan': du_lieu['md5'].get('du_doan_van_tiep'),
-        'md5_van_gan': du_lieu['md5'].get('van_gan_nhat'),
-        'md5_so_luong': len(du_lieu['md5'].get('toan_bo_lich_su', [])),
-        'hu_du_doan': du_lieu['hu'].get('du_doan_van_tiep'),
-        'hu_van_gan': du_lieu['hu'].get('van_gan_nhat'),
-        'hu_so_luong': len(du_lieu['hu'].get('toan_bo_lich_su', []))
-    })
-
+# ======= MAIN =======
 if __name__ == '__main__':
-    logging.info("🚀 Khởi động NEXUS·TX với 9 phương pháp phân tích...")
-    logging.info("📊 MD5: ngưỡng 58% | Hũ: ngưỡng 53%")
-    logging.info("🌐 Đang chạy trên Render...")
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, threaded=True)
+    logging.info("🚀 Khởi động NEXUS·TX với Dice History Retrieval Engine...")
+    logging.info("🔑 Đã cấu hình Authorization Bearer Token")
+    logging.info("📊 Engine phân tích dựa trên lịch sử xúc xắc")
+    logging.info(f"🎮 Game hiện tại: {GAME_CONFIG[current_game]['name']}")
+    # Cho Render
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
