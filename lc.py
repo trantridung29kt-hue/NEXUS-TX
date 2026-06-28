@@ -743,8 +743,7 @@ def switch_game():
         'message': f'Đã chuyển sang {GAME_CONFIG[game_key]["name"]}'
     })
 
-# ======= HTML TEMPLATE =======
-HTML_TEMPLATE = # ======= HTML TEMPLATE =======
+
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="vi">
