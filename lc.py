@@ -19,24 +19,17 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ======= CẤU HÌNH GAME =======
-# Token từ request của bạn
+# ⚠️ QUAN TRỌNG: Lấy token mới từ trình duyệt
 BEARER_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjb2RlIjowLCJtZXNzYWdlIjoiU3VjY2VzcyIsIm5pY2tOYW1lIjoic2pnZXIzNTMiLCJhY2Nlc3NUb2tlbiI6ImI0MjNkZGIxMTRjNzhhMWM0ZGJhZTQ5NDczMzY0ZGVkIiwiaXNMb2dpbiI6dHJ1ZSwibW9uZXkiOjAsImlkIjoiODY1NjM1OCIsInVzZXJuYW1lIjoia2llbnBoYW0wNjExIiwiaWF0IjoxNzgyNjY4OTI3LCJleHAiOjE3ODI2OTc3Mjd9.Zh26HDILRXHIXUN5pAn0GZj92xvnKraY2XkMKLTGXWs"
 
-# Headers mặc định
+# Headers với Authorization
 DEFAULT_HEADERS = {
     'accept': '*/*',
     'accept-language': 'en-US,en;q=0.9,vi;q=0.8',
     'authorization': f'Bearer {BEARER_TOKEN}',
     'content-type': 'application/json',
     'origin': 'https://lc79b.bet',
-    'priority': 'u=1, i',
     'referer': 'https://lc79b.bet/',
-    'sec-ch-ua': '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
-    'sec-ch-ua-mobile': '?1',
-    'sec-ch-ua-platform': '"iOS"',
-    'sec-fetch-dest': 'empty',
-    'sec-fetch-mode': 'cors',
-    'sec-fetch-site': 'cross-site',
     'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1',
 }
 
@@ -62,7 +55,7 @@ GAME_CONFIG = {
         'md5_url': 'https://wtxmd52.macminim6.online/v1/txmd5/sessions',
         'hu_url': 'https://wtx.macminim6.online/v1/tx/sessions',
         'bet_url': 'https://betvip.com',
-        'active': False,
+        'active': False,  # Tạm tắt BETVIP vì bị chặn
         'params': {
             'cp': 'R',
             'cl': 'R',
@@ -73,10 +66,10 @@ GAME_CONFIG = {
     }
 }
 
-current_game = 'lc79'
+current_game = 'lc79'  # Chuyển sang LC79
 INITIALIZED = False
 
-# Hàm lấy thời gian Việt Nam (UTC+7)
+# Hàm lấy thời gian Việt Nam
 def get_vietnam_time():
     return datetime.utcnow() + timedelta(hours=7)
 
@@ -456,7 +449,7 @@ def khoi_tao_du_lieu():
 
 # ======= LẤY DỮ LIỆU =======
 def lay_toan_bo_lich_su(url):
-    """Lấy dữ liệu từ API"""
+    """Lấy dữ liệu từ API với Authorization Bearer Token"""
     config = GAME_CONFIG[current_game]
     headers = config.get('headers', DEFAULT_HEADERS.copy())
     params = config.get('params', {})
@@ -468,6 +461,8 @@ def lay_toan_bo_lich_su(url):
             data = response.json()
             if 'list' in data and len(data['list']) > 0:
                 return data['list']
+        elif response.status_code == 403:
+            logging.error("❌ Lỗi 403 - Token hết hạn! Cần lấy token mới")
     except Exception as e:
         logging.error(f"Lỗi lấy dữ liệu: {e}")
     
@@ -575,7 +570,6 @@ def cap_nhat_du_lieu():
 # ======= ROUTES =======
 @app.route('/')
 def index():
-    """Render trang chính"""
     global du_lieu
     
     # Đợi dữ liệu được load
@@ -624,7 +618,6 @@ def switch_game():
     global current_game
     current_game = game_key
     
-    # Cập nhật dữ liệu ngay
     cap_nhat_du_lieu()
     
     return jsonify({
@@ -634,11 +627,10 @@ def switch_game():
     })
 
 # ======= KHỞI ĐỘNG =======
-# Khởi tạo dữ liệu lần đầu
 khoi_tao_du_lieu()
 cap_nhat_du_lieu()
 
-# Tạo scheduler cập nhật dữ liệu mỗi 5 giây
+# Scheduler cập nhật mỗi 5 giây
 scheduler = BackgroundScheduler()
 scheduler.add_job(func=cap_nhat_du_lieu, trigger="interval", seconds=5)
 scheduler.start()
@@ -646,7 +638,8 @@ scheduler.start()
 logging.info("🚀 Khởi động NEXUS·TX với Dice History Retrieval Engine...")
 logging.info("📊 Scheduler sẽ cập nhật dữ liệu mỗi 5 giây")
 
-# ======= HTML TEMPLATE =======
+# ======= HTML TEMPLATE (giữ nguyên như code của bạn) =======
+# ... (phần HTML_TEMPLATE giữ nguyên, chỉ thay đổi ở trên)
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="vi">
@@ -657,6 +650,7 @@ HTML_TEMPLATE = """
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
+/* ... giữ nguyên CSS ... */
 :root{
   --bg-0:#05060a; --bg-1:#0a0d16; --bg-2:#0e1320;
   --glass:rgba(255,255,255,.04); --glass-2:rgba(255,255,255,.07);
@@ -797,76 +791,76 @@ body{
 }
 
 .hero-main{display:flex; align-items:center; justify-content:center; gap:36px; flex-wrap:wrap; padding:18px 0 6px}
-.gauge-wrap{position:relative; width:180px; height:180px; flex:none}
+.gauge-wrap{position:relative; width:200px; height:200px; flex:none}
 .gauge-wrap svg{width:100%; height:100%; transform:rotate(-90deg)}
-.gauge-track{fill:none; stroke:rgba(255,255,255,.06); stroke-width:12}
-.gauge-fill{fill:none; stroke-width:12; stroke-linecap:round; transition:stroke-dashoffset 1s cubic-bezier(.22,1,.36,1), stroke .5s}
+.gauge-track{fill:none; stroke:rgba(255,255,255,.06); stroke-width:14}
+.gauge-fill{fill:none; stroke-width:14; stroke-linecap:round; transition:stroke-dashoffset 1s cubic-bezier(.22,1,.36,1), stroke .5s}
 .gauge-center{position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px}
-.gauge-call{font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:1.4em; letter-spacing:-.5px; transition:color .4s}
-.gauge-sub{font-size:.5em; color:var(--text-faint); text-transform:uppercase; letter-spacing:1.5px}
-.gauge-conf{font-size:.6em; font-weight:600; color:var(--amber); margin-top:2px}
+.gauge-call{font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:1.8em; letter-spacing:-.5px; transition:color .4s}
+.gauge-sub{font-size:.6em; color:var(--text-faint); text-transform:uppercase; letter-spacing:1.5px}
+.gauge-conf{font-size:.7em; font-weight:600; color:var(--amber); margin-top:2px}
 
-.prob-cols{display:flex; flex-direction:column; gap:8px; min-width:140px}
-.prob-row{display:flex; flex-direction:column; gap:3px}
+.prob-cols{display:flex; flex-direction:column; gap:12px; min-width:180px}
+.prob-row{display:flex; flex-direction:column; gap:5px}
 .prob-row-top{display:flex; justify-content:space-between; align-items:baseline}
-.prob-name{font-size:.7em; font-weight:600; color:var(--text-dim); letter-spacing:.3px}
-.prob-pct{font-family:'JetBrains Mono',monospace; font-weight:700; font-size:.9em}
-.prob-track{height:4px; border-radius:3px; background:rgba(255,255,255,.06); overflow:hidden}
-.prob-fill{height:100%; border-radius:3px; transition:width 1s cubic-bezier(.22,1,.36,1)}
+.prob-name{font-size:.75em; font-weight:600; color:var(--text-dim); letter-spacing:.3px}
+.prob-pct{font-family:'JetBrains Mono',monospace; font-weight:700; font-size:1em}
+.prob-track{height:5px; border-radius:4px; background:rgba(255,255,255,.06); overflow:hidden}
+.prob-fill{height:100%; border-radius:4px; transition:width 1s cubic-bezier(.22,1,.36,1)}
 
-.metric-strip{display:grid; grid-template-columns:repeat(4,1fr); gap:1px; margin-top:16px; background:var(--border); border-radius:var(--radius-md); overflow:hidden}
-.metric-cell{background:rgba(10,13,22,.6); padding:10px 6px; text-align:center}
-.metric-num{font-family:'JetBrains Mono',monospace; font-weight:700; font-size:.9em; color:var(--text)}
-.metric-lbl{font-size:.55em; color:var(--text-faint); text-transform:uppercase; letter-spacing:.5px; margin-top:2px}
+.metric-strip{display:grid; grid-template-columns:repeat(4,1fr); gap:1px; margin-top:20px; background:var(--border); border-radius:var(--radius-md); overflow:hidden}
+.metric-cell{background:rgba(10,13,22,.6); padding:12px 8px; text-align:center}
+.metric-num{font-family:'JetBrains Mono',monospace; font-weight:700; font-size:1em; color:var(--text)}
+.metric-lbl{font-size:.58em; color:var(--text-faint); text-transform:uppercase; letter-spacing:.6px; margin-top:3px}
 
-.engine-stats{display:grid; grid-template-columns:repeat(4,1fr); gap:8px; padding:12px 22px 16px}
+.engine-stats{display:grid; grid-template-columns:repeat(4,1fr); gap:10px; padding:16px 22px 20px}
 @media(max-width:600px){.engine-stats{grid-template-columns:1fr 1fr}}
 .engine-stat{
   background:var(--glass-2); border:1px solid var(--border); border-radius:var(--radius-sm);
-  padding:10px 8px; display:flex; flex-direction:column; gap:2px;
+  padding:14px; display:flex; flex-direction:column; gap:3px;
 }
-.engine-stat .v{font-family:'JetBrains Mono',monospace; font-weight:700; font-size:1em}
-.engine-stat .l{font-size:.55em; color:var(--text-faint); text-transform:uppercase; letter-spacing:.5px}
+.engine-stat .v{font-family:'JetBrains Mono',monospace; font-weight:700; font-size:1.2em}
+.engine-stat .l{font-size:.62em; color:var(--text-faint); text-transform:uppercase; letter-spacing:.6px}
 
-.stats-grid{display:grid; grid-template-columns:repeat(4,1fr); gap:8px; padding:16px 22px 20px}
+.stats-grid{display:grid; grid-template-columns:repeat(4,1fr); gap:10px; padding:16px 22px 20px}
 @media(max-width:600px){.stats-grid{grid-template-columns:1fr 1fr}}
 .stat-box{
   background:var(--glass-2); border:1px solid var(--border); border-radius:var(--radius-sm);
-  padding:12px 10px; display:flex; flex-direction:column; gap:2px;
+  padding:14px; display:flex; flex-direction:column; gap:3px;
 }
-.stat-box .v{font-family:'JetBrains Mono',monospace; font-weight:700; font-size:1em}
-.stat-box .l{font-size:.55em; color:var(--text-faint); text-transform:uppercase; letter-spacing:.5px}
+.stat-box .v{font-family:'JetBrains Mono',monospace; font-weight:700; font-size:1.2em}
+.stat-box .l{font-size:.62em; color:var(--text-faint); text-transform:uppercase; letter-spacing:.6px}
 
-.timeline{padding:6px 14px 16px; max-height:300px; overflow-y:auto}
-.timeline::-webkit-scrollbar{width:4px}
-.timeline::-webkit-scrollbar-thumb{background:var(--border-strong); border-radius:2px}
+.timeline{padding:6px 14px 16px; max-height:400px; overflow-y:auto}
+.timeline::-webkit-scrollbar{width:6px}
+.timeline::-webkit-scrollbar-thumb{background:var(--border-strong); border-radius:3px}
 .t-row{
-  display:grid; grid-template-columns:auto 1fr auto; gap:10px; align-items:center;
-  padding:6px 8px; border-radius:var(--radius-sm); transition:background .25s;
+  display:grid; grid-template-columns:auto 1fr auto; gap:12px; align-items:center;
+  padding:10px 8px; border-radius:var(--radius-sm); transition:background .25s;
   animation:rowIn .4s ease both;
 }
 @keyframes rowIn{from{opacity:0; transform:translateX(-6px)} to{opacity:1; transform:translateX(0)}}
 .t-row:hover{background:rgba(255,255,255,.04)}
-.t-rail{display:flex; flex-direction:column; align-items:center; gap:0; position:relative; width:10px}
-.t-dot{width:6px; height:6px; border-radius:50%; flex:none; z-index:1; box-shadow:0 0 6px currentColor}
-.t-line{position:absolute; top:6px; bottom:-18px; width:1px; background:var(--border)}
+.t-rail{display:flex; flex-direction:column; align-items:center; gap:0; position:relative; width:12px}
+.t-dot{width:8px; height:8px; border-radius:50%; flex:none; z-index:1; box-shadow:0 0 8px currentColor}
+.t-line{position:absolute; top:8px; bottom:-18px; width:1px; background:var(--border)}
 .t-row:last-child .t-line{display:none}
-.t-mid{display:flex; flex-direction:column; gap:2px; min-width:0}
-.t-tags{display:flex; align-items:center; gap:4px; flex-wrap:wrap}
-.tag{padding:1px 6px; border-radius:4px; font-size:.6em; font-weight:700; font-family:'JetBrains Mono',monospace; letter-spacing:.2px}
+.t-mid{display:flex; flex-direction:column; gap:4px; min-width:0}
+.t-tags{display:flex; align-items:center; gap:6px; flex-wrap:wrap}
+.tag{padding:2px 8px; border-radius:5px; font-size:.65em; font-weight:700; font-family:'JetBrains Mono',monospace; letter-spacing:.3px}
 .tag-tai{background:var(--blue-soft); color:var(--blue)}
 .tag-xiu{background:var(--rose-soft); color:var(--rose)}
-.t-meta{font-size:.6em; color:var(--text-faint); display:flex; gap:6px; align-items:center}
-.t-dice{font-family:'JetBrains Mono',monospace; letter-spacing:.3px}
-.t-result{text-align:right; display:flex; flex-direction:column; align-items:flex-end; gap:1px}
-.t-result .status{font-size:.65em; font-weight:700; display:flex; align-items:center; gap:3px}
-.t-result .time{font-size:.55em; color:var(--text-faint); font-family:'JetBrains Mono',monospace}
+.t-meta{font-size:.68em; color:var(--text-faint); display:flex; gap:8px; align-items:center}
+.t-dice{font-family:'JetBrains Mono',monospace; letter-spacing:.5px}
+.t-result{text-align:right; display:flex; flex-direction:column; align-items:flex-end; gap:2px}
+.t-result .status{font-size:.72em; font-weight:700; display:flex; align-items:center; gap:4px}
+.t-result .time{font-size:.62em; color:var(--text-faint); font-family:'JetBrains Mono',monospace}
 
-.empty{display:flex; flex-direction:column; align-items:center; justify-content:center; padding:40px 20px; color:var(--text-faint); gap:8px; text-align:center}
-.empty svg{width:30px; height:30px; opacity:.4}
-.empty .big{font-family:'JetBrains Mono',monospace; font-size:1.2em; font-weight:700; color:var(--text-dim)}
+.empty{display:flex; flex-direction:column; align-items:center; justify-content:center; padding:64px 20px; color:var(--text-faint); gap:10px; text-align:center}
+.empty svg{width:40px; height:40px; opacity:.4}
+.empty .big{font-family:'JetBrains Mono',monospace; font-size:1.4em; font-weight:700; color:var(--text-dim)}
 
-.foot{text-align:center; color:var(--text-faint); font-size:.65em; padding-top:4px; letter-spacing:.2px}
+.foot{text-align:center; color:var(--text-faint); font-size:.7em; padding-top:6px; letter-spacing:.3px}
 </style>
 </head>
 <body>
@@ -908,11 +902,10 @@ body{
   </header>
 
   <div class="dual-grid" id="dual-grid">
-    <!-- HŨ -->
     <div id="hu-container">
       <div class="gcard">
         <div class="gcard-head">
-          <span class="eyebrow">🟠 Tài Xỉu Hũ</span>
+          <span class="eyebrow">🟠Tài Xỉu Hũ</span>
         </div>
         <div class="hero" id="hu-hero">
           <div class="hero-top">
@@ -921,9 +914,9 @@ body{
           </div>
           <div class="hero-main">
             <div class="gauge-wrap">
-              <svg viewBox="0 0 180 180">
-                <circle class="gauge-track" cx="90" cy="90" r="76"/>
-                <circle class="gauge-fill" id="hu-gauge" cx="90" cy="90" r="76" stroke="#ff8c42" stroke-dasharray="477.52" stroke-dashoffset="238"/>
+              <svg viewBox="0 0 200 200">
+                <circle class="gauge-track" cx="100" cy="100" r="85"/>
+                <circle class="gauge-fill" id="hu-gauge" cx="100" cy="100" r="85" stroke="#ff8c42" stroke-dasharray="534.07" stroke-dashoffset="267"/>
               </svg>
               <div class="gauge-center">
                 <span class="gauge-sub">Khuyến nghị</span>
@@ -964,11 +957,10 @@ body{
       </div>
     </div>
 
-    <!-- MD5 -->
     <div id="md5-container">
       <div class="gcard">
         <div class="gcard-head">
-          <span class="eyebrow">🔷 Tài Xỉu MD5</span>
+          <span class="eyebrow">🔷Tài Xỉu MD5</span>
         </div>
         <div class="hero" id="md5-hero">
           <div class="hero-top">
@@ -977,9 +969,9 @@ body{
           </div>
           <div class="hero-main">
             <div class="gauge-wrap">
-              <svg viewBox="0 0 180 180">
-                <circle class="gauge-track" cx="90" cy="90" r="76"/>
-                <circle class="gauge-fill" id="md5-gauge" cx="90" cy="90" r="76" stroke="#3b9eff" stroke-dasharray="477.52" stroke-dashoffset="238"/>
+              <svg viewBox="0 0 200 200">
+                <circle class="gauge-track" cx="100" cy="100" r="85"/>
+                <circle class="gauge-fill" id="md5-gauge" cx="100" cy="100" r="85" stroke="#3b9eff" stroke-dasharray="534.07" stroke-dashoffset="267"/>
               </svg>
               <div class="gauge-center">
                 <span class="gauge-sub">Khuyến nghị</span>
@@ -1021,7 +1013,6 @@ body{
     </div>
   </div>
 
-  <!-- STATISTICS -->
   <div class="gcard" style="margin-bottom:18px">
     <div class="gcard-head">
       <span class="eyebrow">📊 Thống kê tổng hợp</span>
@@ -1034,7 +1025,6 @@ body{
     </div>
   </div>
 
-  <!-- HISTORY -->
   <div class="gcard">
     <div class="gcard-head">
       <span class="eyebrow">📜 Lịch sử dự đoán</span>
@@ -1043,7 +1033,7 @@ body{
     <div class="timeline" id="timeline">
       <div class="empty">
         <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.4"/><path d="M12 8v4l2.5 1.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
-        <span>Chưa có dữ liệu</span>
+        <span>Đang thu thập dữ liệu...</span>
       </div>
     </div>
   </div>
@@ -1052,12 +1042,11 @@ body{
 </div>
 
 <script>
-// Dữ liệu từ server (render sẵn)
+// Dữ liệu từ server
 const INITIAL_HU_DATA = {{ hu_data|tojson }};
 const INITIAL_MD5_DATA = {{ md5_data|tojson }};
 
-// Chu vi gauge: 2 * PI * 76 = 477.52
-const GAUGE_CIRC = 477.52;
+const GAUGE_CIRC = 534.07;
 
 console.log('📊 Initial HU Data:', INITIAL_HU_DATA);
 console.log('📊 Initial MD5 Data:', INITIAL_MD5_DATA);
@@ -1082,46 +1071,34 @@ function updateType(type, data) {
   const isTai = data.khuyen_nghi === 'TAI';
   const isXiu = data.khuyen_nghi === 'XIU';
   const isNoSignal = data.khuyen_nghi === 'NO SIGNAL' || data.khuyen_nghi === 'CHUA_DU_DU_LIEU';
-  
-  // Lấy probability cho TAI
-  let probTai = data.xac_suat_tai || 0.5;
-  let probXiu = data.xac_suat_xiu || 0.5;
-  
+  const prob = isTai ? data.xac_suat_tai : (isXiu ? data.xac_suat_xiu : 0.5);
   const callColor = isTai ? '#3b9eff' : (isXiu ? '#ff4d6d' : (isNoSignal ? '#ffb454' : '#ffb454'));
   
-  // Cập nhật gauge (hiển thị xác suất TAI)
   const gauge = document.getElementById(prefix + '-gauge');
   if (gauge) {
     gauge.setAttribute('stroke', callColor);
-    // Dashoffset = (1 - probTai) * circumference
-    gauge.setAttribute('stroke-dashoffset', GAUGE_CIRC * (1 - probTai));
+    gauge.setAttribute('stroke-dashoffset', GAUGE_CIRC * (1 - prob));
   }
   
-  // Cập nhật khuyến nghị
   const callEl = document.getElementById(prefix + '-call');
   if (callEl) {
-    let displayText = data.khuyen_nghi;
-    if (displayText === 'NO SIGNAL') displayText = '⏸️ NO SIGNAL';
-    else if (displayText === 'CHUA_DU_DU_LIEU') displayText = '⏳ ĐANG THU THẬP';
-    else if (displayText === 'CÂN NHẮC') displayText = '⚖️ CÂN NHẮC';
-    callEl.textContent = displayText;
+    callEl.textContent = data.khuyen_nghi === 'NO SIGNAL' ? '⏸️ NO SIGNAL' : 
+                         data.khuyen_nghi === 'CHUA_DU_DU_LIEU' ? '⏳ ĐANG THU THẬP' :
+                         data.khuyen_nghi === 'CÂN NHẮC' ? '⚖️ CÂN NHẮC' : data.khuyen_nghi;
     callEl.style.color = callColor;
   }
   
-  // Cập nhật các thông số
   document.getElementById(prefix + '-conf').textContent = (data.do_tin_cay_so || 0) + '%';
-  document.getElementById(prefix + '-pct-tai').textContent = (probTai * 100).toFixed(1) + '%';
-  document.getElementById(prefix + '-pct-xiu').textContent = (probXiu * 100).toFixed(1) + '%';
-  document.getElementById(prefix + '-bar-tai').style.width = (probTai * 100) + '%';
-  document.getElementById(prefix + '-bar-xiu').style.width = (probXiu * 100) + '%';
+  document.getElementById(prefix + '-pct-tai').textContent = (data.xac_suat_tai * 100).toFixed(1) + '%';
+  document.getElementById(prefix + '-pct-xiu').textContent = (data.xac_suat_xiu * 100).toFixed(1) + '%';
+  document.getElementById(prefix + '-bar-tai').style.width = (data.xac_suat_tai * 100) + '%';
+  document.getElementById(prefix + '-bar-xiu').style.width = (data.xac_suat_xiu * 100) + '%';
   
-  // Metric strip
   document.getElementById(prefix + '-m-samples').textContent = data.samples || 0;
   document.getElementById(prefix + '-m-exact').textContent = data.exact_samples || 0;
   document.getElementById(prefix + '-m-similar').textContent = data.similar_samples || 0;
   document.getElementById(prefix + '-m-conf').textContent = (data.do_tin_cay_so || 0) + '%';
   
-  // Engine stats
   document.getElementById(prefix + '-es-similarity').textContent = (data.similarity_score || 0) + '%';
   document.getElementById(prefix + '-es-history').textContent = data.tong_so_van || 0;
   document.getElementById(prefix + '-es-taixiu').textContent = (data.so_tai || 0) + '-' + (data.so_xiu || 0);
@@ -1140,10 +1117,8 @@ function updateType(type, data) {
     signalEl.textContent = data.signal || 'N/A';
   }
   
-  // Last result
   document.getElementById(prefix + '-last-result').textContent = data.ket_qua_hien_tai || '—';
   
-  // Dice
   const diceContainer = document.getElementById(prefix + '-last-dice');
   if (data.last_dice && data.last_dice.length > 0) {
     diceContainer.innerHTML = data.last_dice.map(d => `<span class="die mono">${d}</span>`).join('');
@@ -1152,11 +1127,7 @@ function updateType(type, data) {
   }
 }
 
-// Cập nhật ngay khi load trang
 document.addEventListener('DOMContentLoaded', function() {
-    console.log('📊 DOM loaded - Initial HU Data:', INITIAL_HU_DATA);
-    console.log('📊 DOM loaded - Initial MD5 Data:', INITIAL_MD5_DATA);
-    
     if (INITIAL_HU_DATA && INITIAL_HU_DATA.tong_so_van && INITIAL_HU_DATA.tong_so_van >= 5) {
         updateType('hu', INITIAL_HU_DATA);
     }
@@ -1199,9 +1170,9 @@ function renderTimeline(history) {
         <div class="t-mid">
           <div class="t-tags">
             <span class="tag ${item.du_doan === 'TAI' ? 'tag-tai' : 'tag-xiu'}">${item.du_doan}</span>
-            <span style="font-size:.55em;color:var(--text-faint)">→</span>
+            <span style="font-size:.6em;color:var(--text-faint)">→</span>
             <span class="tag ${item.ket_qua === 'TAI' ? 'tag-tai' : 'tag-xiu'}">${item.ket_qua}</span>
-            <span style="font-size:.5em;color:var(--text-faint);font-family:'JetBrains Mono',monospace">${typeLabel}</span>
+            <span style="font-size:.55em;color:var(--text-faint);font-family:'JetBrains Mono',monospace">${typeLabel}</span>
           </div>
           <div class="t-meta"><span class="t-dice mono">${item.xuc_xac || ''}</span></div>
         </div>
@@ -1275,7 +1246,7 @@ async function fetchData() {
   }
 }
 
-// Fetch data every 3 seconds
+fetchData();
 setInterval(fetchData, 3000);
 </script>
 </body>
