@@ -8,9 +8,19 @@ import logging
 import math
 from datetime import datetime
 import statistics
+import sys
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Cấu hình logging chi tiết hơn
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # ======= CẤU HÌNH =======
 URL_MD5 = "https://wtxmd52.tele68.com/v1/txmd5/sessions?cp=R&cl=R&pf=web&at=7e3955a9b92d0a12a675097596748258"
@@ -50,27 +60,85 @@ du_lieu = {
     "hu": tao_cau_truc_loai()
 }
 
-# ======= LẤY DỮ LIỆU =======
-def lay_toan_bo_lich_su(url):
+# ======= LẤY DỮ LIỆU - CẢI TIẾN =======
+def lay_toan_bo_lich_su(url, loai=""):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
         "Accept": "application/json",
+        "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
         "Referer": "https://tele68.com/",
-        "Origin": "https://tele68.com"
+        "Origin": "https://tele68.com",
+        "Cache-Control": "no-cache"
     }
 
     try:
-        r = requests.get(url, headers=headers, timeout=10)
-
-        print("STATUS:", r.status_code)
-        print("BODY:", r.text[:500])
-
-        r.raise_for_status()
-
-        return r.json().get("list", [])
-
+        logger.info(f"📡 Đang lấy dữ liệu {loai} từ {url}")
+        r = requests.get(url, headers=headers, timeout=15)
+        
+        logger.info(f"📊 {loai} - Status: {r.status_code}")
+        
+        if r.status_code != 200:
+            logger.error(f"❌ {loai} - Lỗi HTTP: {r.status_code}")
+            return []
+        
+        # Kiểm tra nội dung
+        if not r.text or len(r.text.strip()) == 0:
+            logger.error(f"❌ {loai} - Response rỗng")
+            return []
+        
+        # Thử parse JSON
+        try:
+            data = r.json()
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ {loai} - Lỗi parse JSON: {e}")
+            logger.error(f"📄 Response đầu: {r.text[:200]}")
+            return []
+        
+        # Kiểm tra cấu trúc
+        if not isinstance(data, dict):
+            logger.error(f"❌ {loai} - Response không phải object: {type(data)}")
+            return []
+        
+        # Lấy danh sách
+        danh_sach = data.get("list", [])
+        
+        if not danh_sach:
+            logger.warning(f"⚠️ {loai} - Không có dữ liệu 'list' trong response")
+            logger.debug(f"📄 Keys: {list(data.keys())}")
+            # Thử các key khác
+            for key in ["data", "result", "sessions", "items"]:
+                if key in data and isinstance(data[key], list):
+                    danh_sach = data[key]
+                    logger.info(f"✅ {loai} - Tìm thấy dữ liệu trong key '{key}'")
+                    break
+        
+        if not danh_sach:
+            logger.warning(f"⚠️ {loai} - Không tìm thấy danh sách nào")
+            return []
+        
+        # Kiểm tra cấu trúc từng item
+        if not isinstance(danh_sach[0], dict):
+            logger.error(f"❌ {loai} - Item không phải dict: {type(danh_sach[0])}")
+            return []
+        
+        # Log thông tin
+        logger.info(f"✅ {loai} - Lấy được {len(danh_sach)} ván")
+        if len(danh_sach) > 0:
+            first = danh_sach[0]
+            logger.info(f"📝 {loai} - Ván đầu: id={first.get('id')}, result={first.get('resultTruyenThong')}, point={first.get('point')}")
+        
+        return danh_sach
+        
+    except requests.exceptions.Timeout:
+        logger.error(f"⏰ {loai} - Timeout khi gọi API")
+        return []
+    except requests.exceptions.ConnectionError:
+        logger.error(f"🔌 {loai} - Lỗi kết nối")
+        return []
     except Exception as e:
-        print("LOI:", e)
+        logger.error(f"💥 {loai} - Lỗi không xác định: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return []
 
 # ======= CÁC CHỈ BÁO KỸ THUẬT =======
@@ -91,8 +159,8 @@ def tinh_rsi(mang, period=14):
             gains.append(0)
             losses.append(abs(diff))
     
-    avg_gain = sum(gains[-period:]) / period if len(gains) >= period else sum(gains) / len(gains)
-    avg_loss = sum(losses[-period:]) / period if len(losses) >= period else sum(losses) / len(losses)
+    avg_gain = sum(gains[-period:]) / period if len(gains) >= period else sum(gains) / len(gains) if gains else 0
+    avg_loss = sum(losses[-period:]) / period if len(losses) >= period else sum(losses) / len(losses) if losses else 0
     
     if avg_loss == 0:
         return 100
@@ -150,17 +218,22 @@ def phan_tich_9_phuong_phap(danh_sach, loai=""):
     Thêm RSI, MACD, Bollinger Bands
     """
     if not danh_sach or len(danh_sach) < 15:
+        logger.info(f"⚠️ {loai} - Chưa đủ dữ liệu: {len(danh_sach) if danh_sach else 0}")
         return tao_du_doan_mac_dinh(danh_sach, loai)
     
     van_hien_tai = danh_sach[0]
     lich_su = danh_sach[1:]
     
-    ket_qua = [p['resultTruyenThong'] for p in lich_su]
-    diem = [p['point'] for p in lich_su]
+    ket_qua = [p.get('resultTruyenThong', '') for p in lich_su]
+    diem = [p.get('point', 10.5) for p in lich_su]
     tong_van = len(ket_qua)
     
     # Chuyển đổi sang số: 1 = TÀI, 0 = XỈU
-    mang_so = [1 if k == 'TAI' else 0 for k in ket_qua]
+    mang_so = [1 if k == 'TAI' else 0 for k in ket_qua if k in ['TAI', 'XIU']]
+    
+    if len(mang_so) < 10:
+        logger.warning(f"⚠️ {loai} - Không đủ dữ liệu số: {len(mang_so)}")
+        return tao_du_doan_mac_dinh(danh_sach, loai)
     
     # ============================================================
     # PHƯƠNG PHÁP 1: CHUỖI MARKOV BẬC 3
@@ -550,7 +623,7 @@ def phan_tich_9_phuong_phap(danh_sach, loai=""):
     # ============================================================
     # TẠO PHÂN TÍCH CHI TIẾT
     # ============================================================
-    chuoi = [van_hien_tai['resultTruyenThong']] + ket_qua
+    chuoi = [van_hien_tai.get('resultTruyenThong', '')] + ket_qua
     chuoi_hien_tai = 1
     for i in range(1, len(chuoi)):
         if chuoi[i] == chuoi[i-1]:
@@ -579,8 +652,8 @@ def phan_tich_9_phuong_phap(danh_sach, loai=""):
 PHAN TICH 9 PHUONG PHAP - {loai.upper()}
 Du lieu: {tong_van} van
 
-VAN HIEN TAI: {van_hien_tai['resultTruyenThong']} | Diem: {van_hien_tai['point']}
-CHUOI: {chuoi_hien_tai} van {van_hien_tai['resultTruyenThong']} lien tiep
+VAN HIEN TAI: {van_hien_tai.get('resultTruyenThong', '')} | Diem: {van_hien_tai.get('point', 0)}
+CHUOI: {chuoi_hien_tai} van {van_hien_tai.get('resultTruyenThong', '')} lien tiep
 
 ------------------------------------------------------------
 THONG KE TONG THE:
@@ -615,7 +688,7 @@ KHUYEN NGHI: {khuyen} ({do_tin})
         'phan_tich': phan_tich,
         'van_gan_nhat': van_hien_tai,
         'chieu_dai_chuoi': chuoi_hien_tai,
-        'ket_qua_hien_tai': van_hien_tai['resultTruyenThong'],
+        'ket_qua_hien_tai': van_hien_tai.get('resultTruyenThong', ''),
         'tong_so_van': tong_van,
         'so_tai': so_tai,
         'so_xiu': so_xiu,
@@ -633,18 +706,18 @@ KHUYEN NGHI: {khuyen} ({do_tin})
     }
 
 def tao_du_doan_mac_dinh(danh_sach, loai=""):
-    van_gan = danh_sach[0] if danh_sach else None
+    van_gan = danh_sach[0] if danh_sach and len(danh_sach) > 0 else None
     return {
         'khuyen_nghi': 'CHUA_DU_DU_LIEU',
         'xac_suat_tai': 0.5,
         'xac_suat_xiu': 0.5,
         'do_tin_cay': 'Thap',
         'do_tin_cay_so': 10,
-        'phan_tich': f'Dang thu thap du lieu cho {loai}... Can it nhat 15 van.',
+        'phan_tich': f'Dang thu thap du lieu cho {loai}... Can it nhat 15 van. (Hiện có {len(danh_sach) if danh_sach else 0})',
         'van_gan_nhat': van_gan,
         'chieu_dai_chuoi': 0,
-        'ket_qua_hien_tai': van_gan['resultTruyenThong'] if van_gan else None,
-        'tong_so_van': len(danh_sach),
+        'ket_qua_hien_tai': van_gan.get('resultTruyenThong') if van_gan else None,
+        'tong_so_van': len(danh_sach) if danh_sach else 0,
         'so_tai': 0,
         'so_xiu': 0,
         'p_markov': 0.5, 'p_chu_ky': 0.5, 'p_ml': 0.5,
@@ -664,12 +737,12 @@ def cap_nhat_hieu_suat(du_doan, ket_qua_thuc, loai):
     hieu_suat = du_lieu[loai]['hieu_suat_phuong_phap']
     
     methods = [
-        ('markov', du_doan['p_markov']),
-        ('fft', du_doan['p_chu_ky']),
-        ('ml', du_doan['p_ml']),
-        ('bayes', du_doan['p_bayes']),
-        ('pattern', du_doan['p_pattern']),
-        ('tam_ly', du_doan['p_tam_ly']),
+        ('markov', du_doan.get('p_markov', 0.5)),
+        ('fft', du_doan.get('p_chu_ky', 0.5)),
+        ('ml', du_doan.get('p_ml', 0.5)),
+        ('bayes', du_doan.get('p_bayes', 0.5)),
+        ('pattern', du_doan.get('p_pattern', 0.5)),
+        ('tam_ly', du_doan.get('p_tam_ly', 0.5)),
         ('rsi', du_doan.get('p_rsi', 0.5)),
         ('macd', du_doan.get('p_macd', 0.5)),
         ('bbands', du_doan.get('p_bbands', 0.5))
@@ -691,21 +764,39 @@ def dinh_dang_xuc_xac(van):
 # ======= CẬP NHẬT DỮ LIỆU =======
 def cap_nhat_loai(loai, url):
     data = du_lieu[loai]
+    count = 0
     
     while True:
         try:
-            danh_sach = lay_toan_bo_lich_su(url)
+            danh_sach = lay_toan_bo_lich_su(url, loai)
+            
             if not danh_sach:
-                time.sleep(2)
+                logger.warning(f"⚠️ {loai} - Không lấy được dữ liệu, chờ 3s...")
+                time.sleep(3)
                 continue
             
-            data['toan_bo_lich_su'] = danh_sach
-            van_gan = danh_sach[0]
-            van_id = van_gan.get('id')
+            # Kiểm tra dữ liệu hợp lệ
+            valid_items = []
+            for item in danh_sach:
+                if isinstance(item, dict) and 'resultTruyenThong' in item:
+                    valid_items.append(item)
+            
+            if not valid_items:
+                logger.warning(f"⚠️ {loai} - Không có item hợp lệ")
+                time.sleep(3)
+                continue
+            
+            data['toan_bo_lich_su'] = valid_items
+            van_gan = valid_items[0]
+            van_id = van_gan.get('id', str(count))
+            
+            logger.info(f"🔄 {loai} - Ván mới nhất: {van_gan.get('resultTruyenThong')} | ID: {van_id}")
             
             if data['lan_cap_nhat_truoc'] is None or data['lan_cap_nhat_truoc'] != van_id:
+                logger.info(f"📊 {loai} - Phát hiện ván mới, phân tích...")
+                
                 if data['du_doan_van_tiep'] and data['van_gan_nhat']:
-                    du_doan_cu = data['du_doan_van_tiep']['khuyen_nghi']
+                    du_doan_cu = data['du_doan_van_tiep'].get('khuyen_nghi', '')
                     ket_qua_thuc = van_gan.get('resultTruyenThong')
                     
                     if du_doan_cu in ['TAI', 'XIU'] and ket_qua_thuc:
@@ -714,7 +805,7 @@ def cap_nhat_loai(loai, url):
                             'du_doan': du_doan_cu,
                             'ket_qua': ket_qua_thuc,
                             'dung': dung,
-                            'diem': van_gan.get('point'),
+                            'diem': van_gan.get('point', 0),
                             'xuc_xac': dinh_dang_xuc_xac(van_gan),
                             'thoi_gian': datetime.now().strftime('%H:%M:%S')
                         })
@@ -732,18 +823,28 @@ def cap_nhat_loai(loai, url):
                             )
                         
                         cap_nhat_hieu_suat(data['du_doan_van_tiep'], ket_qua_thuc, loai)
+                        
+                        logger.info(f"✅ {loai} - Dự đoán: {du_doan_cu} → KQ: {ket_qua_thuc} ({'✅ THẮNG' if dung else '❌ THUA'})")
                 
+                # Cập nhật dự đoán mới
                 data['van_gan_nhat'] = van_gan
-                data['du_doan_van_tiep'] = phan_tich_9_phuong_phap(danh_sach, loai)
+                data['du_doan_van_tiep'] = phan_tich_9_phuong_phap(valid_items, loai)
                 data['lan_cap_nhat_truoc'] = van_id
                 data['thoi_gian_cap_nhat'] = datetime.now().strftime('%H:%M:%S')
+                count += 1
                 
+            else:
+                logger.debug(f"🔄 {loai} - Không có ván mới")
+            
         except Exception as e:
-            logging.error(f"Lỗi cập nhật {loai}: {e}")
+            logger.error(f"💥 {loai} - Lỗi trong vòng lặp: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
         
         time.sleep(2)
 
 # ======= KHỞI ĐỘNG THREAD =======
+logger.info("🚀 Khởi động hệ thống...")
 threading.Thread(target=cap_nhat_loai, args=('md5', URL_MD5), daemon=True).start()
 threading.Thread(target=cap_nhat_loai, args=('hu', URL_HU), daemon=True).start()
 
@@ -1135,6 +1236,10 @@ const GAUGE_CIRC = 534.07;
 function updateType(type, data) {
   if (!data || data.tong_so_van < 15) {
     document.getElementById(type + '-call').textContent = 'Đang thu thập...';
+    document.getElementById(type + '-m-streak').textContent = '0';
+    document.getElementById(type + '-m-taixiu').textContent = '0–0';
+    document.getElementById(type + '-m-conf').textContent = '0%';
+    document.getElementById(type + '-m-rounds').textContent = data?.tong_so_van || 0;
     return;
   }
   
@@ -1164,11 +1269,22 @@ function updateType(type, data) {
   document.getElementById(prefix + '-bar-tai').style.width = (data.xac_suat_tai * 100) + '%';
   document.getElementById(prefix + '-bar-xiu').style.width = (data.xac_suat_xiu * 100) + '%';
   
-  document.getElementById(prefix + '-m-streak').textContent = data.chieu_dai_chuoi;
-  document.getElementById(prefix + '-m-taixiu').textContent = data.so_tai + '–' + data.so_xiu;
+  document.getElementById(prefix + '-m-streak').textContent = data.chieu_dai_chuoi || 0;
+  document.getElementById(prefix + '-m-taixiu').textContent = (data.so_tai || 0) + '–' + (data.so_xiu || 0);
   document.getElementById(prefix + '-m-conf').textContent = data.do_tin_cay_so + '%';
-  document.getElementById(prefix + '-m-rounds').textContent = data.tong_so_van;
+  document.getElementById(prefix + '-m-rounds').textContent = data.tong_so_van || 0;
   document.getElementById(prefix + '-last-result').textContent = data.ket_qua_hien_tai || '—';
+  
+  // Update dice
+  const diceEl = document.getElementById(prefix + '-last-dice');
+  if (diceEl && data.van_gan_nhat) {
+    const dices = data.van_gan_nhat.dices;
+    if (dices && Array.isArray(dices) && dices.length > 0) {
+      diceEl.innerHTML = dices.map(d => `<span class="die mono">${d}</span>`).join('');
+    } else {
+      diceEl.innerHTML = `<span class="die mono">—</span>`;
+    }
+  }
   
   const modelKeys = ['p_markov', 'p_chu_ky', 'p_ml', 'p_bayes', 'p_pattern', 'p_tam_ly', 'p_rsi', 'p_macd', 'p_bbands'];
   const weightKeys = ['markov', 'fft', 'ml', 'bayes', 'pattern', 'tam_ly', 'rsi', 'macd', 'bbands'];
@@ -1177,23 +1293,31 @@ function updateType(type, data) {
     if (idx >= modelKeys.length) return;
     const p = data[modelKeys[idx]] || 0.5;
     const w = data.trong_so ? data.trong_so[weightKeys[idx]] : 0.10;
-    card.querySelector('.model-pct').textContent = (p * 100).toFixed(1) + '%';
-    card.querySelector('.model-pct').style.color = p >= 0.5 ? accentColor : '#ff4d6d';
-    card.querySelector('.model-side').textContent = 'nghiêng ' + (p >= 0.5 ? 'TÀI' : 'XỈU');
-    card.querySelector('.model-weight').textContent = 'w ' + (w * 100).toFixed(0) + '%';
-    card.querySelector('.model-bar-fill').style.width = (p * 100) + '%';
+    const pct = card.querySelector('.model-pct');
+    if (pct) {
+      pct.textContent = (p * 100).toFixed(1) + '%';
+      pct.style.color = p >= 0.5 ? accentColor : '#ff4d6d';
+    }
+    const side = card.querySelector('.model-side');
+    if (side) side.textContent = 'nghiêng ' + (p >= 0.5 ? 'TÀI' : 'XỈU');
+    const weight = card.querySelector('.model-weight');
+    if (weight) weight.textContent = 'w ' + (w * 100).toFixed(0) + '%';
+    const fill = card.querySelector('.model-bar-fill');
+    if (fill) fill.style.width = (p * 100) + '%';
   });
 }
 
 function updateStats(data) {
   if (!data) return;
-  document.getElementById('s-md5-winrate').textContent = (data.md5?.thong_ke_tong_hop?.ty_le_thang || 0) + '%';
-  document.getElementById('s-hu-winrate').textContent = (data.hu?.thong_ke_tong_hop?.ty_le_thang || 0) + '%';
-  document.getElementById('s-md5-total').textContent = data.md5?.thong_ke_tong_hop?.tong_du_doan || 0;
-  document.getElementById('s-hu-total').textContent = data.hu?.thong_ke_tong_hop?.tong_du_doan || 0;
+  const md5 = data.md5 || {};
+  const hu = data.hu || {};
+  document.getElementById('s-md5-winrate').textContent = (md5.thong_ke_tong_hop?.ty_le_thang || 0) + '%';
+  document.getElementById('s-hu-winrate').textContent = (hu.thong_ke_tong_hop?.ty_le_thang || 0) + '%';
+  document.getElementById('s-md5-total').textContent = md5.thong_ke_tong_hop?.tong_du_doan || 0;
+  document.getElementById('s-hu-total').textContent = hu.thong_ke_tong_hop?.tong_du_doan || 0;
   
-  if (data.md5?.thoi_gian_cap_nhat || data.hu?.thoi_gian_cap_nhat) {
-    document.getElementById('hud-time').textContent = data.md5?.thoi_gian_cap_nhat || data.hu?.thoi_gian_cap_nhat || '--:--:--';
+  if (md5.thoi_gian_cap_nhat || hu.thoi_gian_cap_nhat) {
+    document.getElementById('hud-time').textContent = md5.thoi_gian_cap_nhat || hu.thoi_gian_cap_nhat || '--:--:--';
   }
 }
 
@@ -1251,9 +1375,11 @@ async function fetchData() {
     if (data.hu?.lich_su_dung_sai) {
       data.hu.lich_su_dung_sai.forEach(h => { h.loai = 'hu'; allHistory.push(h); });
     }
-    allHistory.sort((a,b) => a.thoi_gian.localeCompare(b.thoi_gian));
+    allHistory.sort((a,b) => (a.thoi_gian || '').localeCompare(b.thoi_gian || ''));
     renderTimeline(allHistory);
-  } catch(e) {}
+  } catch(e) {
+    console.error('Fetch error:', e);
+  }
 }
 
 fetchData();
@@ -1286,12 +1412,32 @@ def api_all():
         }
     return jsonify(result)
 
+@app.route('/debug')
+def debug():
+    """Trang debug để kiểm tra dữ liệu"""
+    return jsonify({
+        'md5': {
+            'so_luong_van': len(du_lieu['md5']['toan_bo_lich_su']),
+            'van_gan_nhat': du_lieu['md5']['van_gan_nhat'],
+            'thoi_gian_cap_nhat': du_lieu['md5']['thoi_gian_cap_nhat'],
+            'du_doan': du_lieu['md5']['du_doan_van_tiep']
+        },
+        'hu': {
+            'so_luong_van': len(du_lieu['hu']['toan_bo_lich_su']),
+            'van_gan_nhat': du_lieu['hu']['van_gan_nhat'],
+            'thoi_gian_cap_nhat': du_lieu['hu']['thoi_gian_cap_nhat'],
+            'du_doan': du_lieu['hu']['du_doan_van_tiep']
+        }
+    })
+
 import os
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
+    logger.info(f"🚀 Server khởi chạy tại http://0.0.0.0:{port}")
     app.run(
         host="0.0.0.0",
         port=port,
-        threaded=True
+        threaded=True,
+        debug=False
     )
