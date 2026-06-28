@@ -8,6 +8,7 @@ import logging
 import math
 from datetime import datetime
 import statistics
+import os
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -54,7 +55,7 @@ du_lieu = {
 def lay_toan_bo_lich_su(url):
     for attempt in range(3):
         try:
-            r = requests.get(url, timeout=5)
+            r = requests.get(url, timeout=10)
             r.raise_for_status()
             data = r.json()
             if 'list' in data and len(data['list']) > 0:
@@ -646,9 +647,9 @@ def tao_du_doan_mac_dinh(danh_sach, loai=""):
         'p_bayes': 0.5, 
         'p_pattern': 0.5, 
         'p_tam_ly': 0.5,
-        'p_rsi': 0.5,      # ĐÃ THÊM
-        'p_macd': 0.5,     # ĐÃ THÊM
-        'p_bbands': 0.5,   # ĐÃ THÊM
+        'p_rsi': 0.5,
+        'p_macd': 0.5,
+        'p_bbands': 0.5,
         'trong_so': {'markov':0.15, 'fft':0.10, 'ml':0.15, 'bayes':0.10, 
                      'pattern':0.10, 'tam_ly':0.10, 'rsi':0.15, 'macd':0.10, 'bbands':0.05},
         'nguong': 0.58
@@ -696,16 +697,15 @@ def cap_nhat_loai(loai, url):
             danh_sach = lay_toan_bo_lich_su(url)
             if not danh_sach:
                 logging.warning(f"⚠️ {loai} - Không lấy được dữ liệu")
-                time.sleep(2)
+                time.sleep(3)
                 continue
             
             data['toan_bo_lich_su'] = danh_sach
             van_gan = danh_sach[0]
             van_id = van_gan.get('id')
             
-            logging.info(f"📊 {loai} - Số ván: {len(danh_sach)}")
-            
             if data['lan_cap_nhat_truoc'] is None or data['lan_cap_nhat_truoc'] != van_id:
+                # Cập nhật lịch sử dự đoán trước
                 if data['du_doan_van_tiep'] and data['van_gan_nhat']:
                     du_doan_cu = data['du_doan_van_tiep']['khuyen_nghi']
                     ket_qua_thuc = van_gan.get('resultTruyenThong')
@@ -735,24 +735,49 @@ def cap_nhat_loai(loai, url):
                         
                         cap_nhat_hieu_suat(data['du_doan_van_tiep'], ket_qua_thuc, loai)
                 
+                # Cập nhật dự đoán mới
                 data['van_gan_nhat'] = van_gan
                 data['du_doan_van_tiep'] = phan_tich_9_phuong_phap(danh_sach, loai)
                 data['lan_cap_nhat_truoc'] = van_id
                 data['thoi_gian_cap_nhat'] = datetime.now().strftime('%H:%M:%S')
                 
-                # Log kết quả dự đoán
-                du_doan = data['du_doan_van_tiep']
-                logging.info(f"🎯 {loai} - Dự đoán: {du_doan.get('khuyen_nghi') if du_doan else 'None'}")
-                logging.info(f"📈 {loai} - Xác suất Tài: {du_doan.get('xac_suat_tai') if du_doan else 'None'}")
+                logging.info(f"✅ {loai} - Cập nhật thành công | ID: {van_id} | Result: {van_gan.get('resultTruyenThong')}")
                 
         except Exception as e:
-            logging.error(f"Lỗi cập nhật {loai}: {e}")
+            logging.error(f"❌ Lỗi cập nhật {loai}: {e}")
         
-        time.sleep(2)
+        time.sleep(3)
+
+# ======= KHỞI TẠO DỮ LIỆU BAN ĐẦU =======
+def init_data():
+    """Khởi tạo dữ liệu ngay khi app start - QUAN TRỌNG CHO RENDER"""
+    logging.info("🔄 Đang khởi tạo dữ liệu ban đầu...")
+    
+    for loai, url in [('md5', URL_MD5), ('hu', URL_HU)]:
+        try:
+            danh_sach = lay_toan_bo_lich_su(url)
+            if danh_sach:
+                data = du_lieu[loai]
+                data['toan_bo_lich_su'] = danh_sach
+                data['van_gan_nhat'] = danh_sach[0]
+                data['du_doan_van_tiep'] = phan_tich_9_phuong_phap(danh_sach, loai)
+                data['lan_cap_nhat_truoc'] = danh_sach[0].get('id')
+                data['thoi_gian_cap_nhat'] = datetime.now().strftime('%H:%M:%S')
+                logging.info(f"✅ Khởi tạo {loai} thành công với {len(danh_sach)} ván")
+                logging.info(f"   🎯 Dự đoán: {data['du_doan_van_tiep']['khuyen_nghi']}")
+            else:
+                logging.warning(f"⚠️ Không lấy được dữ liệu cho {loai}")
+        except Exception as e:
+            logging.error(f"❌ Lỗi khởi tạo {loai}: {e}")
+
+# Gọi khởi tạo dữ liệu ngay khi import
+init_data()
 
 # ======= KHỞI ĐỘNG THREAD =======
+# Dùng thread để cập nhật liên tục
 threading.Thread(target=cap_nhat_loai, args=('md5', URL_MD5), daemon=True).start()
 threading.Thread(target=cap_nhat_loai, args=('hu', URL_HU), daemon=True).start()
+logging.info("🚀 Background threads đã khởi động")
 
 # ======= HTML TEMPLATE =======
 HTML_TEMPLATE = """
@@ -1140,21 +1165,41 @@ body{
 const GAUGE_CIRC = 534.07;
 
 function updateType(type, data) {
-  console.log(`🔄 Updating ${type} with:`, data);
+  console.log(`🔄 Updating ${type}:`, data);
   
-  // Kiểm tra dữ liệu hợp lệ
-  if (!data || data.tong_so_van < 15) {
-    document.getElementById(type + '-call').textContent = 'Đang thu thập...';
+  if (!data) {
+    document.getElementById(type + '-call').textContent = '⏳ Đang khởi tạo...';
+    return;
+  }
+  
+  const soVan = data.tong_so_van || 0;
+  
+  // Hiển thị dù chưa đủ 15 ván
+  if (soVan < 15) {
+    document.getElementById(type + '-call').textContent = `📡 Đang thu thập (${soVan}/15)`;
+    document.getElementById(type + '-m-rounds').textContent = soVan;
     document.getElementById(type + '-conf').textContent = '0%';
     document.getElementById(type + '-m-conf').textContent = '0%';
-    document.getElementById(type + '-m-rounds').textContent = data?.tong_so_van || '0';
     document.getElementById(type + '-pct-tai').textContent = '50%';
     document.getElementById(type + '-pct-xiu').textContent = '50%';
     document.getElementById(type + '-bar-tai').style.width = '50%';
     document.getElementById(type + '-bar-xiu').style.width = '50%';
+    document.getElementById(type + '-m-streak').textContent = '0';
+    document.getElementById(type + '-m-taixiu').textContent = '0–0';
+    if (data.ket_qua_hien_tai) {
+      document.getElementById(type + '-last-result').textContent = data.ket_qua_hien_tai;
+    }
+    // Update models mặc định
+    const cards = document.getElementById(type + '-models').querySelectorAll('.model-card');
+    cards.forEach((card) => {
+      card.querySelector('.model-pct').textContent = '50%';
+      card.querySelector('.model-side').textContent = 'nghiêng —';
+      card.querySelector('.model-bar-fill').style.width = '50%';
+    });
     return;
   }
   
+  // Đã có đủ dữ liệu
   const prefix = type;
   const isTai = data.khuyen_nghi === 'TAI';
   const isXiu = data.khuyen_nghi === 'XIU';
@@ -1261,14 +1306,13 @@ function renderTimeline(history) {
 
 async function fetchData() {
   try {
-    console.log('🔄 Fetching data...');
     const res = await fetch('/api/all', {cache:'no-store'});
     if (!res.ok) {
       console.error('❌ API error:', res.status);
       return;
     }
     const data = await res.json();
-    console.log('✅ Data received:', data);
+    console.log('✅ Data received');
     
     updateType('md5', data.md5?.du_doan_van_tiep);
     updateType('hu', data.hu?.du_doan_van_tiep);
@@ -1288,9 +1332,9 @@ async function fetchData() {
   }
 }
 
-// Khởi tạo và cập nhật
+// Khởi tạo và cập nhật mỗi 2 giây
 fetchData();
-setInterval(fetchData, 3000);
+setInterval(fetchData, 2000);
 </script>
 </body>
 </html>
@@ -1333,4 +1377,5 @@ def debug():
 if __name__ == '__main__':
     logging.info("🚀 Khởi động NEXUS·TX với 9 phương pháp phân tích...")
     logging.info("📊 MD5: ngưỡng 58% | Hũ: ngưỡng 53%")
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+    logging.info("🌐 Đang chạy trên Render...")
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, threaded=True)
