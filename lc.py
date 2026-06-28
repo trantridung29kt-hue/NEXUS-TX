@@ -19,69 +19,64 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ======= CẤU HÌNH GAME =======
-# ======= CẤU HÌNH GAME =======
 # Token mới từ request của bạn
 BEARER_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjb2RlIjowLCJtZXNzYWdlIjoiU3VjY2VzcyIsIm5pY2tOYW1lIjoic2pnZXIzNTMiLCJhY2Nlc3NUb2tlbiI6ImI0MjNkZGIxMTRjNzhhMWM0ZGJhZTQ5NDczMzY0ZGVkIiwiaXNMb2dpbiI6dHJ1ZSwibW9uZXkiOjAsImlkIjoiODY1NjM1OCIsInVzZXJuYW1lIjoia2llbnBoYW0wNjExIiwiaWF0IjoxNzgyNjY4OTI3LCJleHAiOjE3ODI2OTc3Mjd9.Zh26HDILRXHIXUN5pAn0GZj92xvnKraY2XkMKLTGXWs"
+
+# Headers mặc định cho tất cả request
+DEFAULT_HEADERS = {
+    'accept': '*/*',
+    'accept-language': 'en-US,en;q=0.9,vi;q=0.8',
+    'authorization': f'Bearer {BEARER_TOKEN}',
+    'content-type': 'application/json',
+    'origin': 'https://lc79b.bet',
+    'priority': 'u=1, i',
+    'referer': 'https://lc79b.bet/',
+    'sec-ch-ua': '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
+    'sec-ch-ua-mobile': '?1',
+    'sec-ch-ua-platform': '"iOS"',
+    'sec-fetch-dest': 'empty',
+    'sec-fetch-mode': 'cors',
+    'sec-fetch-site': 'cross-site',
+    'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1',
+}
 
 GAME_CONFIG = {
     'lc79': {
         'name': 'LC79',
         'color': '#ff6b35',
-        'md5_url': 'https://wtxmd52.tele68.com/v1/txmd5/sessions?cp=R&cl=R&pf=web&at=b423ddb114c78a1c4dbae49473364ded',
-        'hu_url': 'https://wtx.tele68.com/v1/tx/sessions?cp=R&cl=R&pf=web&at=b423ddb114c78a1c4dbae49473364ded',
+        'md5_url': 'https://wtxmd52.tele68.com/v1/txmd5/sessions',
+        'hu_url': 'https://wtx.tele68.com/v1/tx/sessions',
         'bet_url': 'https://lc79.bet',
         'active': True,
-        'headers': {
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1',
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
-            'Accept-Encoding': 'gzip, deflate, br, zstd',
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {BEARER_TOKEN}',
-            'Origin': 'https://lc79b.bet',
-            'Referer': 'https://lc79b.bet/',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'cross-site',
-            'Priority': 'u=1, i',
-            'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache',
-            'if-none-match': 'W/"2967-P0MjPxPJWw5FYv93IuLuCatzwWg"'  # Thêm ETag để tránh cache
-        }
+        'params': {
+            'cp': 'R',
+            'cl': 'R',
+            'pf': 'web',
+            'at': 'b423ddb114c78a1c4dbae49473364ded'
+        },
+        'headers': DEFAULT_HEADERS.copy()
     },
     'betvip': {
         'name': 'BETVIP',
         'color': '#8b6cff',
-        'md5_url': 'https://wtxmd52.macminim6.online/v1/txmd5/sessions?cp=R&cl=R&pf=web&at=f5252fdaf1287cdbfdc6de625acf5611',
-        'hu_url': 'https://wtx.macminim6.online/v1/tx/sessions?cp=R&cl=R&pf=web&at=f5252fdaf1287cdbfdc6de625acf5611',
+        'md5_url': 'https://wtxmd52.macminim6.online/v1/txmd5/sessions',
+        'hu_url': 'https://wtx.macminim6.online/v1/tx/sessions',
         'bet_url': 'https://betvip.com',
-        'active': False
+        'active': False,
+        'params': {
+            'cp': 'R',
+            'cl': 'R',
+            'pf': 'web',
+            'at': 'f5252fdaf1287cdbfdc6de625acf5611'
+        },
+        'headers': {}
     }
 }
 
 current_game = 'lc79'
 
 # ======= DICE HISTORY RETRIEVAL ENGINE =======
-def test_api_directly():
-    """Test trực tiếp API để debug"""
-    url = GAME_CONFIG['lc79']['md5_url']
-    headers = GAME_CONFIG['lc79']['headers']
-    
-    try:
-        r = requests.get(url, timeout=30, headers=headers, verify=False)
-        print(f"Status: {r.status_code}")
-        print(f"Headers: {dict(r.headers)}")
-        print(f"Response: {r.text[:500]}")
-        
-        if r.status_code == 200:
-            data = r.json()
-            print(f"Data keys: {data.keys() if isinstance(data, dict) else 'not dict'}")
-            if 'list' in data:
-                print(f"List length: {len(data['list'])}")
-                if len(data['list']) > 0:
-                    print(f"First item: {data['list'][0]}")
-    except Exception as e:
-        print(f"Error: {e}")
+
 class DiceHistoryEngine:
     def __init__(self):
         self.history = []
@@ -457,46 +452,71 @@ khoi_tao_du_lieu()
 
 # ======= LẤY DỮ LIỆU =======
 def lay_toan_bo_lich_su(url):
-    """Lấy dữ liệu từ API với Authorization Bearer Token"""
+    """Lấy dữ liệu từ API với headers và params đầy đủ"""
     config = GAME_CONFIG[current_game]
-    headers = config.get('headers', {})
     
-    logging.info(f"🔑 Đang gọi API: {url[:60]}...")
+    # Lấy headers từ config
+    headers = config.get('headers', DEFAULT_HEADERS.copy())
     
-    for attempt in range(5):
+    # Lấy params từ config
+    params = config.get('params', {})
+    
+    logging.info(f"🔑 Đang gọi API: {url}")
+    
+    for attempt in range(3):
         try:
-            r = requests.get(url, timeout=30, headers=headers, verify=False)
+            # Gọi API với params và headers
+            response = requests.get(
+                url, 
+                params=params, 
+                headers=headers, 
+                timeout=30, 
+                verify=False
+            )
             
-            if r.status_code == 200:
-                data = r.json()
-                if 'list' in data and len(data['list']) > 0:
-                    logging.info(f"✅ Lấy dữ liệu thành công: {len(data['list'])} phiên")
-                    return data['list']
+            # Log chi tiết để debug
+            logging.info(f"Status: {response.status_code}")
+            logging.info(f"Response length: {len(response.text)}")
+            
+            if response.status_code == 200:
+                if response.text and response.text.strip():
+                    try:
+                        data = response.json()
+                        if 'list' in data and len(data['list']) > 0:
+                            logging.info(f"✅ Thành công: {len(data['list'])} phiên")
+                            # Log sample data
+                            if len(data['list']) > 0:
+                                sample = data['list'][0]
+                                logging.info(f"📝 Sample: {sample.get('dices', [])} - {sample.get('resultTruyenThong', '')}")
+                            return data['list']
+                        else:
+                            logging.warning(f"⚠️ Danh sách rỗng hoặc không có key 'list'")
+                            logging.warning(f"Response keys: {data.keys() if isinstance(data, dict) else 'not dict'}")
+                    except json.JSONDecodeError as e:
+                        logging.warning(f"⚠️ JSON decode error: {e}")
+                        logging.warning(f"Response: {response.text[:200]}")
                 else:
-                    logging.warning(f"⚠️ API trả về danh sách rỗng")
-            elif r.status_code == 403:
-                logging.error(f"❌ Lỗi 403 - Token hết hạn!")
+                    logging.warning(f"⚠️ Response rỗng")
+            elif response.status_code == 403:
+                logging.error(f"❌ Lỗi 403 - Token hết hạn hoặc không hợp lệ!")
                 break
-            elif r.status_code == 429:
-                logging.warning(f"⚠️ Rate limit (429), chờ 10s...")
+            elif response.status_code == 429:
+                logging.warning(f"⚠️ Rate limit, chờ 10s...")
                 time.sleep(10)
             else:
-                logging.warning(f"⚠️ Status code: {r.status_code}")
+                logging.warning(f"⚠️ Status code: {response.status_code}")
                 
         except requests.exceptions.Timeout:
-            logging.warning(f"Attempt {attempt+1}/5: Timeout")
-            if attempt < 4:
-                time.sleep(5)
+            logging.warning(f"Attempt {attempt+1}/3: Timeout")
+            time.sleep(3)
         except requests.exceptions.RequestException as e:
-            logging.warning(f"Attempt {attempt+1}/5: {str(e)[:80]}")
-            if attempt < 4:
-                time.sleep(3)
+            logging.warning(f"Attempt {attempt+1}/3: {str(e)[:100]}")
+            time.sleep(3)
         except Exception as e:
             logging.error(f"Lỗi: {e}")
-            if attempt < 4:
-                time.sleep(3)
+            time.sleep(3)
     
-    # Nếu thất bại, trả về dữ liệu mẫu
+    # Nếu thất bại, dùng dữ liệu mẫu
     logging.warning("⚠️ Sử dụng dữ liệu mẫu")
     return tao_du_lieu_mau()
 
