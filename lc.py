@@ -1148,12 +1148,22 @@ body{
 const GAUGE_CIRC = 534.07;
 
 function updateType(type, data) {
-  console.log('Updating', type, data);
+  console.log(`🔄 Updating ${type}:`, data);
   
-  if (!data || !data.tong_so_van || data.tong_so_van < 5) {
+  // Kiểm tra dữ liệu
+  if (!data || typeof data !== 'object') {
     document.getElementById(type + '-call').textContent = 'Đang thu thập...';
     return;
   }
+  
+  // Kiểm tra tong_so_van
+  if (!data.tong_so_van || data.tong_so_van < 5) {
+    document.getElementById(type + '-call').textContent = 'Đang thu thập...';
+    console.log(`⚠️ ${type}: tong_so_van = ${data.tong_so_van}`);
+    return;
+  }
+  
+  console.log(`✅ ${type}: tong_so_van = ${data.tong_so_van}, Prediction = ${data.khuyen_nghi}`);
   
   const prefix = type;
   const isTai = data.khuyen_nghi === 'TAI';
@@ -1162,12 +1172,14 @@ function updateType(type, data) {
   const prob = isTai ? data.xac_suat_tai : (isXiu ? data.xac_suat_xiu : 0.5);
   const callColor = isTai ? '#3b9eff' : (isXiu ? '#ff4d6d' : (isNoSignal ? '#ffb454' : '#ffb454'));
   
+  // Cập nhật gauge
   const gauge = document.getElementById(prefix + '-gauge');
   if (gauge) {
     gauge.setAttribute('stroke', callColor);
     gauge.setAttribute('stroke-dashoffset', GAUGE_CIRC * (1 - prob));
   }
   
+  // Cập nhật khuyến nghị
   const callEl = document.getElementById(prefix + '-call');
   if (callEl) {
     callEl.textContent = data.khuyen_nghi === 'NO SIGNAL' ? '⏸️ NO SIGNAL' : 
@@ -1176,6 +1188,7 @@ function updateType(type, data) {
     callEl.style.color = callColor;
   }
   
+  // Cập nhật các thông số
   document.getElementById(prefix + '-conf').textContent = (data.do_tin_cay_so || 0) + '%';
   document.getElementById(prefix + '-pct-tai').textContent = (data.xac_suat_tai * 100).toFixed(1) + '%';
   document.getElementById(prefix + '-pct-xiu').textContent = (data.xac_suat_xiu * 100).toFixed(1) + '%';
@@ -1300,7 +1313,17 @@ async function fetchData() {
     const res = await fetch('/api/all', {cache:'no-store'});
     if (!res.ok) return;
     const data = await res.json();
-    console.log('Data received:', data);
+    console.log('📊 Data received:', data);
+    
+    // Kiểm tra và log dữ liệu
+    if (data.hu && data.hu.du_doan_van_tiep) {
+      console.log('✅ HU tong_so_van:', data.hu.du_doan_van_tiep.tong_so_van);
+      console.log('✅ HU Prediction:', data.hu.du_doan_van_tiep.khuyen_nghi);
+    }
+    if (data.md5 && data.md5.du_doan_van_tiep) {
+      console.log('✅ MD5 tong_so_van:', data.md5.du_doan_van_tiep.tong_so_van);
+      console.log('✅ MD5 Prediction:', data.md5.du_doan_van_tiep.khuyen_nghi);
+    }
     
     updateType('hu', data.hu?.du_doan_van_tiep);
     updateType('md5', data.md5?.du_doan_van_tiep);
@@ -1316,7 +1339,7 @@ async function fetchData() {
     allHistory.sort((a,b) => a.thoi_gian?.localeCompare(b.thoi_gian));
     renderTimeline(allHistory);
   } catch(e) {
-    console.error('Fetch error:', e);
+    console.error('❌ Fetch error:', e);
   }
 }
 
