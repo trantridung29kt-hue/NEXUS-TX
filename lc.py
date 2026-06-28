@@ -52,19 +52,26 @@ du_lieu = {
 
 # ======= LẤY DỮ LIỆU =======
 def lay_toan_bo_lich_su(url):
-    for attempt in range(3):
-        try:
-            r = requests.get(url, timeout=5)
-            r.raise_for_status()
-            data = r.json()
-            if 'list' in data and len(data['list']) > 0:
-                return data['list']
-        except Exception as e:
-            if attempt < 2:
-                time.sleep(1)
-            else:
-                logging.error(f"Lỗi lấy dữ liệu từ {url}: {e}")
-    return []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137.0 Safari/537.36",
+        "Accept": "application/json",
+        "Referer": "https://tele68.com/",
+        "Origin": "https://tele68.com"
+    }
+
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+
+        print("STATUS:", r.status_code)
+        print("BODY:", r.text[:500])
+
+        r.raise_for_status()
+
+        return r.json().get("list", [])
+
+    except Exception as e:
+        print("LOI:", e)
+        return []
 
 # ======= CÁC CHỈ BÁO KỸ THUẬT =======
 def tinh_rsi(mang, period=14):
