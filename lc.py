@@ -1,21 +1,17 @@
 from flask import Flask, render_template_string, jsonify, request
 import requests
 import json
-import threading
 import time
 from collections import deque, defaultdict
 import logging
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 import sys
 import os
 from typing import Dict, List, Tuple, Optional, Any
 import urllib3
-from datetime import datetime, timedelta
+from apscheduler.schedulers.background import BackgroundScheduler
 
-# Hàm lấy thời gian Việt Nam (UTC+7)
-def get_vietnam_time():
-    return datetime.utcnow() + timedelta(hours=7)
 # Tắt cảnh báo SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -26,7 +22,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # Token từ request của bạn
 BEARER_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjb2RlIjowLCJtZXNzYWdlIjoiU3VjY2VzcyIsIm5pY2tOYW1lIjoic2pnZXIzNTMiLCJhY2Nlc3NUb2tlbiI6ImI0MjNkZGIxMTRjNzhhMWM0ZGJhZTQ5NDczMzY0ZGVkIiwiaXNMb2dpbiI6dHJ1ZSwibW9uZXkiOjAsImlkIjoiODY1NjM1OCIsInVzZXJuYW1lIjoia2llbnBoYW0wNjExIiwiaWF0IjoxNzgyNjY4OTI3LCJleHAiOjE3ODI2OTc3Mjd9.Zh26HDILRXHIXUN5pAn0GZj92xvnKraY2XkMKLTGXWs"
 
-# Headers mặc định cho tất cả request
+# Headers mặc định
 DEFAULT_HEADERS = {
     'accept': '*/*',
     'accept-language': 'en-US,en;q=0.9,vi;q=0.8',
@@ -79,6 +75,10 @@ GAME_CONFIG = {
 
 current_game = 'lc79'
 INITIALIZED = False
+
+# Hàm lấy thời gian Việt Nam (UTC+7)
+def get_vietnam_time():
+    return datetime.utcnow() + timedelta(hours=7)
 
 # ======= DICE HISTORY RETRIEVAL ENGINE =======
 
@@ -147,7 +147,7 @@ class DiceHistoryEngine:
         
         self.total_samples = len(sessions)
         self.last_update = datetime.now()
-        logging.info(f"📊 Đã xây dựng index: {len(sessions)} phiên, {len(self.index_by_dice)} bộ xúc xắc khác nhau")
+        logging.info(f"📊 Đã xây dựng index: {len(sessions)} phiên")
     
     def calculate_similarity_score(self, target_dices: List[int], matched_dices: List[int]) -> float:
         if not target_dices or not matched_dices:
@@ -423,6 +423,9 @@ class DiceHistoryEngine:
         }
 
 # ======= CẤU TRÚC DỮ LIỆU =======
+du_lieu = {}
+engines = {}
+
 def tao_cau_truc_loai():
     return {
         "toan_bo_lich_su": [],
@@ -439,9 +442,6 @@ def tao_cau_truc_loai():
         }
     }
 
-du_lieu = {}
-engines = {}
-
 def khoi_tao_du_lieu():
     global du_lieu, engines
     du_lieu = {
@@ -456,92 +456,29 @@ def khoi_tao_du_lieu():
 
 # ======= LẤY DỮ LIỆU =======
 def lay_toan_bo_lich_su(url):
-    """Lấy dữ liệu từ API với headers và params đầy đủ"""
+    """Lấy dữ liệu từ API"""
     config = GAME_CONFIG[current_game]
-    
     headers = config.get('headers', DEFAULT_HEADERS.copy())
     params = config.get('params', {})
     
-    logging.info(f"🔑 Đang gọi API: {url}")
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=30, verify=False)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if 'list' in data and len(data['list']) > 0:
+                return data['list']
+    except Exception as e:
+        logging.error(f"Lỗi lấy dữ liệu: {e}")
     
-    for attempt in range(3):
-        try:
-            response = requests.get(
-                url, 
-                params=params, 
-                headers=headers, 
-                timeout=30, 
-                verify=False
-            )
-            
-            logging.info(f"Status: {response.status_code}")
-            logging.info(f"Response length: {len(response.text)}")
-            
-            if response.status_code == 200:
-                if response.text and response.text.strip():
-                    try:
-                        data = response.json()
-                        if 'list' in data and len(data['list']) > 0:
-                            logging.info(f"✅ Thành công: {len(data['list'])} phiên")
-                            if len(data['list']) > 0:
-                                sample = data['list'][0]
-                                logging.info(f"📝 Sample: {sample.get('dices', [])} - {sample.get('resultTruyenThong', '')}")
-                            return data['list']
-                        else:
-                            logging.warning(f"⚠️ Danh sách rỗng hoặc không có key 'list'")
-                    except json.JSONDecodeError as e:
-                        logging.warning(f"⚠️ JSON decode error: {e}")
-                        logging.warning(f"Response: {response.text[:200]}")
-                else:
-                    logging.warning(f"⚠️ Response rỗng")
-            elif response.status_code == 403:
-                logging.error(f"❌ Lỗi 403 - Token hết hạn!")
-                break
-            elif response.status_code == 429:
-                logging.warning(f"⚠️ Rate limit, chờ 10s...")
-                time.sleep(10)
-            else:
-                logging.warning(f"⚠️ Status code: {response.status_code}")
-                
-        except requests.exceptions.Timeout:
-            logging.warning(f"Attempt {attempt+1}/3: Timeout")
-            time.sleep(3)
-        except requests.exceptions.RequestException as e:
-            logging.warning(f"Attempt {attempt+1}/3: {str(e)[:100]}")
-            time.sleep(3)
-        except Exception as e:
-            logging.error(f"Lỗi: {e}")
-            time.sleep(3)
-    
-    logging.warning("⚠️ Sử dụng dữ liệu mẫu")
-    return tao_du_lieu_mau()
+    return None
 
-def tao_du_lieu_mau():
-    """Tạo dữ liệu mẫu để test"""
-    import random
-    sample_data = []
-    results = ['TAI', 'XIU']
-    for i in range(50):
-        dices = [random.randint(1, 6) for _ in range(3)]
-        point = sum(dices)
-        result = 'TAI' if point >= 11 else 'XIU'
-        sample_data.append({
-            'id': i + 1,
-            'dices': dices,
-            'point': point,
-            'resultTruyenThong': result
-        })
-    return sample_data
-
-# ======= PHÂN TÍCH =======
 def phan_tich_voi_engine(danh_sach, loai):
     if not danh_sach or len(danh_sach) < 5:
-        logging.warning(f"⚠️ {loai}: Không đủ dữ liệu ({len(danh_sach) if danh_sach else 0})")
         return tao_du_doan_mac_dinh(danh_sach, loai)
     
     engine = engines.get(loai)
     if not engine:
-        logging.warning(f"⚠️ {loai}: Engine không tồn tại")
         return tao_du_doan_mac_dinh(danh_sach, loai)
     
     if engine.total_samples != len(danh_sach):
@@ -549,8 +486,6 @@ def phan_tich_voi_engine(danh_sach, loai):
     
     van_hien_tai = danh_sach[0]
     result = engine.analyze(van_hien_tai)
-    
-    logging.info(f"📊 {loai} - Prediction: {result['prediction']}, Confidence: {result['confidence']}%")
     
     return {
         'khuyen_nghi': result['prediction'],
@@ -594,7 +529,6 @@ def tao_du_doan_mac_dinh(danh_sach, loai=""):
         'signal': 'NO_SIGNAL'
     }
 
-# ======= HÀM ĐỊNH DẠNG =======
 def dinh_dang_xuc_xac(van):
     if not van:
         return ''
@@ -603,19 +537,18 @@ def dinh_dang_xuc_xac(van):
         return '-'.join(str(x) for x in xx)
     return str(van.get('point', ''))
 
-# ======= KHỞI TẠO DỮ LIỆU BAN ĐẦU =======
-def khoi_tao_du_lieu_ban_dau():
-    """Khởi tạo dữ liệu ban đầu từ API (đồng bộ)"""
-    global du_lieu, engines, INITIALIZED
+# ======= CẬP NHẬT DỮ LIỆU =======
+def cap_nhat_du_lieu():
+    """Cập nhật dữ liệu - được gọi bởi scheduler"""
+    global du_lieu, INITIALIZED
     
-    khoi_tao_du_lieu()
+    logging.info("🔄 Đang cập nhật dữ liệu...")
     
     config = GAME_CONFIG[current_game]
     
     for loai in ['hu', 'md5']:
-        url = config[f'{loai}_url']
         try:
-            logging.info(f"🔄 Đang khởi tạo {loai}...")
+            url = config[f'{loai}_url']
             danh_sach = lay_toan_bo_lich_su(url)
             
             if danh_sach and len(danh_sach) > 0:
@@ -630,101 +563,31 @@ def khoi_tao_du_lieu_ban_dau():
                 du_doan = phan_tich_voi_engine(danh_sach, loai)
                 data['du_doan_van_tiep'] = du_doan
                 data['lan_cap_nhat_truoc'] = van_gan.get('id')
-                data['thoi_gian_cap_nhat'] = datetime.now().strftime('%H:%M:%S')
+                data['thoi_gian_cap_nhat'] = get_vietnam_time().strftime('%H:%M:%S')
                 
-                logging.info(f"✅ Khởi tạo {loai} thành công: {len(danh_sach)} phiên, Dự đoán: {du_doan.get('khuyen_nghi', 'N/A')}")
-            else:
-                logging.warning(f"⚠️ Không có dữ liệu cho {loai}")
-                
-        except Exception as e:
-            logging.error(f"❌ Lỗi khởi tạo {loai}: {e}")
-            import traceback
-            logging.error(traceback.format_exc())
-    
-    INITIALIZED = True
-    logging.info("✅ Đã khởi tạo xong tất cả dữ liệu")
-
-# ======= CẬP NHẬT DỮ LIỆU =======
-def cap_nhat_loai(loai, url):
-    """Cập nhật dữ liệu cho loại (hu hoặc md5)"""
-    data = du_lieu[loai]
-    engine = engines[loai]
-    
-    logging.info(f"🔄 Bắt đầu cập nhật {loai}")
-    
-    while True:
-        try:
-            danh_sach = lay_toan_bo_lich_su(url)
-            
-            if not danh_sach:
-                logging.warning(f"⚠️ {loai}: Không có dữ liệu, chờ 5s...")
-                time.sleep(5)
-                continue
-            
-            data['toan_bo_lich_su'] = danh_sach
-            van_gan = danh_sach[0]
-            van_id = van_gan.get('id')
-            
-            engine.build_index(danh_sach)
-            
-            if data['lan_cap_nhat_truoc'] is None or data['lan_cap_nhat_truoc'] != van_id:
-                du_doan_moi = phan_tich_voi_engine(danh_sach, loai)
-                data['van_gan_nhat'] = van_gan
-                data['du_doan_van_tiep'] = du_doan_moi
-                data['lan_cap_nhat_truoc'] = van_id
-                data['thoi_gian_cap_nhat'] = datetime.now().strftime('%H:%M:%S')
-                
-                logging.info(f"✅ {loai}: Đã cập nhật - {len(danh_sach)} phiên, Dự đoán: {du_doan_moi.get('khuyen_nghi', 'N/A')}")
-                
+                logging.info(f"✅ Cập nhật {loai}: {len(danh_sach)} phiên, Dự đoán: {du_doan.get('khuyen_nghi', 'N/A')}")
         except Exception as e:
             logging.error(f"❌ Lỗi cập nhật {loai}: {e}")
-            import traceback
-            logging.error(traceback.format_exc())
-        
-        time.sleep(5)
-
-def start_updater(game_key):
-    global current_game
-    current_game = game_key
-    config = GAME_CONFIG[game_key]
     
-    # Khởi tạo dữ liệu ban đầu (đồng bộ)
-    khoi_tao_du_lieu_ban_dau()
-    
-    # Khởi động threads cập nhật
-    thread_hu = threading.Thread(target=cap_nhat_loai, args=('hu', config['hu_url']), daemon=True)
-    thread_md5 = threading.Thread(target=cap_nhat_loai, args=('md5', config['md5_url']), daemon=True)
-    
-    thread_hu.start()
-    thread_md5.start()
-    
-    logging.info(f"🔄 Đã chuyển sang game: {config['name']}")
-
-# Khởi động với LC79
-start_updater('lc79')
+    INITIALIZED = True
+    logging.info("✅ Đã cập nhật xong dữ liệu")
 
 # ======= ROUTES =======
 @app.route('/')
 def index():
-    """Render trang chính với dữ liệu đã được load"""
-    global du_lieu, INITIALIZED
+    """Render trang chính"""
+    global du_lieu
     
-    # Đợi dữ liệu được load (tối đa 8 giây)
+    # Đợi dữ liệu được load
     wait_time = 0
-    max_wait = 8
+    max_wait = 10
     
     while wait_time < max_wait and not INITIALIZED:
         time.sleep(0.5)
         wait_time += 0.5
-        logging.info(f"⏳ Đợi dữ liệu khởi tạo... {wait_time}s")
     
-    # Lấy dữ liệu
     hu_data = du_lieu.get('hu', {}).get('du_doan_van_tiep', {})
     md5_data = du_lieu.get('md5', {}).get('du_doan_van_tiep', {})
-    
-    # Log để debug
-    logging.info(f"📊 HU data: {hu_data.get('tong_so_van', 0) if hu_data else 0} phiên, Prediction: {hu_data.get('khuyen_nghi', 'N/A') if hu_data else 'None'}")
-    logging.info(f"📊 MD5 data: {md5_data.get('tong_so_van', 0) if md5_data else 0} phiên, Prediction: {md5_data.get('khuyen_nghi', 'N/A') if md5_data else 'None'}")
     
     return render_template_string(HTML_TEMPLATE, 
                                  du_lieu=du_lieu, 
@@ -732,10 +595,6 @@ def index():
                                  current_game=current_game,
                                  hu_data=hu_data or {},
                                  md5_data=md5_data or {})
-
-@app.route('/api/du_lieu/<loai>')
-def api_du_lieu(loai):
-    return jsonify(du_lieu.get(loai, {}).get('du_doan_van_tiep'))
 
 @app.route('/api/all')
 def api_all():
@@ -762,13 +621,30 @@ def switch_game():
     if not GAME_CONFIG[game_key]['active']:
         return jsonify({'error': 'Game đang bảo trì'}), 400
     
-    start_updater(game_key)
+    global current_game
+    current_game = game_key
+    
+    # Cập nhật dữ liệu ngay
+    cap_nhat_du_lieu()
     
     return jsonify({
         'success': True,
         'game': game_key,
         'message': f'Đã chuyển sang {GAME_CONFIG[game_key]["name"]}'
     })
+
+# ======= KHỞI ĐỘNG =======
+# Khởi tạo dữ liệu lần đầu
+khoi_tao_du_lieu()
+cap_nhat_du_lieu()
+
+# Tạo scheduler cập nhật dữ liệu mỗi 5 giây
+scheduler = BackgroundScheduler()
+scheduler.add_job(func=cap_nhat_du_lieu, trigger="interval", seconds=5)
+scheduler.start()
+
+logging.info("🚀 Khởi động NEXUS·TX với Dice History Retrieval Engine...")
+logging.info("📊 Scheduler sẽ cập nhật dữ liệu mỗi 5 giây")
 
 # ======= HTML TEMPLATE =======
 HTML_TEMPLATE = """
@@ -1189,7 +1065,7 @@ console.log('📊 Initial MD5 Data:', INITIAL_MD5_DATA);
 function updateType(type, data) {
   console.log('🔄 Updating', type, 'Data:', data);
   
-  if (!data) {
+  if (!data || typeof data !== 'object') {
     document.getElementById(type + '-call').textContent = 'Đang thu thập...';
     return;
   }
@@ -1408,9 +1284,5 @@ setInterval(fetchData, 3000);
 
 # ======= MAIN =======
 if __name__ == '__main__':
-    logging.info("🚀 Khởi động NEXUS·TX với Dice History Retrieval Engine...")
-    logging.info("🔑 Đã cấu hình Authorization Bearer Token")
-    logging.info("📊 Engine phân tích dựa trên lịch sử xúc xắc")
-    logging.info(f"🎮 Game hiện tại: {GAME_CONFIG[current_game]['name']}")
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
