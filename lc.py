@@ -631,46 +631,16 @@ def cap_nhat_loai(loai, url):
             # Xây dựng index
             engine.build_index(danh_sach)
             
-            # Kiểm tra xem đã có phiên mới chưa
-            if data['lan_cap_nhat_truoc'] is None or data['lan_cap_nhat_truoc'] != van_id:
-                logging.info(f"🔄 {loai}: Phiên mới {van_id}")
-                
-                # Đánh giá dự đoán cũ
-                if data['du_doan_van_tiep'] and data['van_gan_nhat']:
-                    du_doan_cu = data['du_doan_van_tiep'].get('khuyen_nghi')
-                    ket_qua_thuc = van_gan.get('resultTruyenThong')
-                    
-                    if du_doan_cu in ['TAI', 'XIU'] and ket_qua_thuc:
-                        dung = (du_doan_cu == ket_qua_thuc)
-                        data['lich_su_dung_sai'].append({
-                            'du_doan': du_doan_cu,
-                            'ket_qua': ket_qua_thuc,
-                            'dung': dung,
-                            'diem': van_gan.get('point'),
-                            'xuc_xac': dinh_dang_xuc_xac(van_gan),
-                            'thoi_gian': datetime.now().strftime('%H:%M:%S')
-                        })
-                        
-                        data['thong_ke_tong_hop']['tong_du_doan'] += 1
-                        if dung:
-                            data['thong_ke_tong_hop']['tong_dung'] += 1
-                        else:
-                            data['thong_ke_tong_hop']['tong_sai'] += 1
-                        
-                        tong = data['thong_ke_tong_hop']['tong_du_doan']
-                        if tong > 0:
-                            data['thong_ke_tong_hop']['ty_le_thang'] = round(
-                                data['thong_ke_tong_hop']['tong_dung'] / tong * 100, 1
-                            )
-                
-                # Phân tích mới
-                du_doan_moi = phan_tich_voi_engine(danh_sach, loai)
-                data['van_gan_nhat'] = van_gan
-                data['du_doan_van_tiep'] = du_doan_moi
-                data['lan_cap_nhat_truoc'] = van_id
-                data['thoi_gian_cap_nhat'] = datetime.now().strftime('%H:%M:%S')
-                
-                logging.info(f"✅ {loai}: Đã cập nhật - {len(danh_sach)} phiên, Dự đoán: {du_doan_moi.get('khuyen_nghi', 'N/A')}")
+            # 🔥 QUAN TRỌNG: Luôn cập nhật dữ liệu
+            # Phân tích mới
+            du_doan_moi = phan_tich_voi_engine(danh_sach, loai)
+            data['van_gan_nhat'] = van_gan
+            data['du_doan_van_tiep'] = du_doan_moi
+            data['lan_cap_nhat_truoc'] = van_id
+            data['thoi_gian_cap_nhat'] = datetime.now().strftime('%H:%M:%S')
+            
+            logging.info(f"✅ {loai}: Đã cập nhật - {len(danh_sach)} phiên, Dự đoán: {du_doan_moi.get('khuyen_nghi', 'N/A')}")
+            logging.info(f"📊 {loai} data check: tong_so_van = {du_doan_moi.get('tong_so_van', 0)}")
                 
         except Exception as e:
             logging.error(f"❌ Lỗi cập nhật {loai}: {e}")
@@ -701,10 +671,16 @@ start_updater('lc79')
 # ======= ROUTES =======
 @app.route('/')
 def index():
+    # Lấy dữ liệu hiện tại
+    hu_data = du_lieu.get('hu', {}).get('du_doan_van_tiep', {})
+    md5_data = du_lieu.get('md5', {}).get('du_doan_van_tiep', {})
+    
     return render_template_string(HTML_TEMPLATE, 
                                  du_lieu=du_lieu, 
                                  game_config=GAME_CONFIG,
-                                 current_game=current_game)
+                                 current_game=current_game,
+                                 hu_data=hu_data,
+                                 md5_data=md5_data)
 
 @app.route('/api/du_lieu/<loai>')
 def api_du_lieu(loai):
@@ -743,7 +719,7 @@ def switch_game():
         'message': f'Đã chuyển sang {GAME_CONFIG[game_key]["name"]}'
     })
 
-
+# ======= HTML TEMPLATE =======
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="vi">
@@ -1145,18 +1121,20 @@ body{
 </div>
 
 <script>
+// Dữ liệu từ server (render sẵn)
+const INITIAL_HU_DATA = {{ hu_data|tojson }};
+const INITIAL_MD5_DATA = {{ md5_data|tojson }};
+
 const GAUGE_CIRC = 534.07;
 
 function updateType(type, data) {
   console.log('🔄 Updating', type, 'Data:', data);
   
-  // Nếu không có dữ liệu hoặc data rỗng
   if (!data) {
     document.getElementById(type + '-call').textContent = 'Đang thu thập...';
     return;
   }
   
-  // Kiểm tra tong_so_van
   if (!data.tong_so_van || data.tong_so_van < 5) {
     document.getElementById(type + '-call').textContent = 'Đang thu thập...';
     console.log('⚠️ ' + type + ': tong_so_van =', data.tong_so_van);
@@ -1172,14 +1150,12 @@ function updateType(type, data) {
   const prob = isTai ? data.xac_suat_tai : (isXiu ? data.xac_suat_xiu : 0.5);
   const callColor = isTai ? '#3b9eff' : (isXiu ? '#ff4d6d' : (isNoSignal ? '#ffb454' : '#ffb454'));
   
-  // Cập nhật gauge
   const gauge = document.getElementById(prefix + '-gauge');
   if (gauge) {
     gauge.setAttribute('stroke', callColor);
     gauge.setAttribute('stroke-dashoffset', GAUGE_CIRC * (1 - prob));
   }
   
-  // Cập nhật khuyến nghị
   const callEl = document.getElementById(prefix + '-call');
   if (callEl) {
     callEl.textContent = data.khuyen_nghi === 'NO SIGNAL' ? '⏸️ NO SIGNAL' : 
@@ -1188,7 +1164,6 @@ function updateType(type, data) {
     callEl.style.color = callColor;
   }
   
-  // Cập nhật các thông số
   document.getElementById(prefix + '-conf').textContent = (data.do_tin_cay_so || 0) + '%';
   document.getElementById(prefix + '-pct-tai').textContent = (data.xac_suat_tai * 100).toFixed(1) + '%';
   document.getElementById(prefix + '-pct-xiu').textContent = (data.xac_suat_xiu * 100).toFixed(1) + '%';
@@ -1227,6 +1202,19 @@ function updateType(type, data) {
     diceContainer.innerHTML = '<span class="die mono">—</span>';
   }
 }
+
+// Cập nhật ngay khi load trang với dữ liệu từ server
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('📊 Initial HU Data:', INITIAL_HU_DATA);
+    console.log('📊 Initial MD5 Data:', INITIAL_MD5_DATA);
+    
+    if (INITIAL_HU_DATA && INITIAL_HU_DATA.tong_so_van) {
+        updateType('hu', INITIAL_HU_DATA);
+    }
+    if (INITIAL_MD5_DATA && INITIAL_MD5_DATA.tong_so_van) {
+        updateType('md5', INITIAL_MD5_DATA);
+    }
+});
 
 function updateStats(data) {
   if (!data) return;
@@ -1313,7 +1301,7 @@ async function fetchData() {
     const res = await fetch('/api/all', {cache:'no-store'});
     if (!res.ok) return;
     const data = await res.json();
-    console.log('📊 Data received:', data);
+    console.log('📊 Data received from API:', data);
     
     // Cập nhật từng loại
     if (data.hu) {
