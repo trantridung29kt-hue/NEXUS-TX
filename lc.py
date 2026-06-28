@@ -19,7 +19,7 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ======= CẤU HÌNH GAME =======
-# Token mới từ request của bạn
+# Token từ request của bạn
 BEARER_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjb2RlIjowLCJtZXNzYWdlIjoiU3VjY2VzcyIsIm5pY2tOYW1lIjoic2pnZXIzNTMiLCJhY2Nlc3NUb2tlbiI6ImI0MjNkZGIxMTRjNzhhMWM0ZGJhZTQ5NDczMzY0ZGVkIiwiaXNMb2dpbiI6dHJ1ZSwibW9uZXkiOjAsImlkIjoiODY1NjM1OCIsInVzZXJuYW1lIjoia2llbnBoYW0wNjExIiwiaWF0IjoxNzgyNjY4OTI3LCJleHAiOjE3ODI2OTc3Mjd9.Zh26HDILRXHIXUN5pAn0GZj92xvnKraY2XkMKLTGXWs"
 
 # Headers mặc định cho tất cả request
@@ -447,6 +447,7 @@ def khoi_tao_du_lieu():
         "hu": DiceHistoryEngine(),
         "md5": DiceHistoryEngine()
     }
+    logging.info("✅ Đã khởi tạo dữ liệu")
 
 khoi_tao_du_lieu()
 
@@ -474,7 +475,6 @@ def lay_toan_bo_lich_su(url):
                 verify=False
             )
             
-            # Log chi tiết để debug
             logging.info(f"Status: {response.status_code}")
             logging.info(f"Response length: {len(response.text)}")
             
@@ -484,21 +484,19 @@ def lay_toan_bo_lich_su(url):
                         data = response.json()
                         if 'list' in data and len(data['list']) > 0:
                             logging.info(f"✅ Thành công: {len(data['list'])} phiên")
-                            # Log sample data
                             if len(data['list']) > 0:
                                 sample = data['list'][0]
                                 logging.info(f"📝 Sample: {sample.get('dices', [])} - {sample.get('resultTruyenThong', '')}")
                             return data['list']
                         else:
                             logging.warning(f"⚠️ Danh sách rỗng hoặc không có key 'list'")
-                            logging.warning(f"Response keys: {data.keys() if isinstance(data, dict) else 'not dict'}")
                     except json.JSONDecodeError as e:
                         logging.warning(f"⚠️ JSON decode error: {e}")
                         logging.warning(f"Response: {response.text[:200]}")
                 else:
                     logging.warning(f"⚠️ Response rỗng")
             elif response.status_code == 403:
-                logging.error(f"❌ Lỗi 403 - Token hết hạn hoặc không hợp lệ!")
+                logging.error(f"❌ Lỗi 403 - Token hết hạn!")
                 break
             elif response.status_code == 429:
                 logging.warning(f"⚠️ Rate limit, chờ 10s...")
@@ -540,10 +538,12 @@ def tao_du_lieu_mau():
 # ======= PHÂN TÍCH =======
 def phan_tich_voi_engine(danh_sach, loai):
     if not danh_sach or len(danh_sach) < 5:
+        logging.warning(f"⚠️ {loai}: Không đủ dữ liệu ({len(danh_sach) if danh_sach else 0})")
         return tao_du_doan_mac_dinh(danh_sach, loai)
     
     engine = engines.get(loai)
     if not engine:
+        logging.warning(f"⚠️ {loai}: Engine không tồn tại")
         return tao_du_doan_mac_dinh(danh_sach, loai)
     
     if engine.total_samples != len(danh_sach):
@@ -551,6 +551,8 @@ def phan_tich_voi_engine(danh_sach, loai):
     
     van_hien_tai = danh_sach[0]
     result = engine.analyze(van_hien_tai)
+    
+    logging.info(f"📊 {loai} - Prediction: {result['prediction']}, Confidence: {result['confidence']}%")
     
     return {
         'khuyen_nghi': result['prediction'],
@@ -582,7 +584,7 @@ def tao_du_doan_mac_dinh(danh_sach, loai=""):
         'do_tin_cay_so': 0,
         'van_gan_nhat': van_gan,
         'ket_qua_hien_tai': van_gan.get('resultTruyenThong') if van_gan else None,
-        'tong_so_van': len(danh_sach),
+        'tong_so_van': len(danh_sach) if danh_sach else 0,
         'so_tai': 0,
         'so_xiu': 0,
         'chieu_dai_chuoi': 0,
@@ -605,23 +607,35 @@ def dinh_dang_xuc_xac(van):
 
 # ======= CẬP NHẬT DỮ LIỆU =======
 def cap_nhat_loai(loai, url):
+    """Cập nhật dữ liệu cho loại (hu hoặc md5)"""
     data = du_lieu[loai]
     engine = engines[loai]
     
+    logging.info(f"🔄 Bắt đầu cập nhật {loai}")
+    
     while True:
         try:
+            # Lấy dữ liệu từ API
             danh_sach = lay_toan_bo_lich_su(url)
+            
             if not danh_sach:
+                logging.warning(f"⚠️ {loai}: Không có dữ liệu, chờ 5s...")
                 time.sleep(5)
                 continue
             
+            # Cập nhật lịch sử
             data['toan_bo_lich_su'] = danh_sach
             van_gan = danh_sach[0]
             van_id = van_gan.get('id')
             
+            # Xây dựng index
             engine.build_index(danh_sach)
             
+            # Kiểm tra xem đã có phiên mới chưa
             if data['lan_cap_nhat_truoc'] is None or data['lan_cap_nhat_truoc'] != van_id:
+                logging.info(f"🔄 {loai}: Phiên mới {van_id}")
+                
+                # Đánh giá dự đoán cũ
                 if data['du_doan_van_tiep'] and data['van_gan_nhat']:
                     du_doan_cu = data['du_doan_van_tiep'].get('khuyen_nghi')
                     ket_qua_thuc = van_gan.get('resultTruyenThong')
@@ -649,13 +663,19 @@ def cap_nhat_loai(loai, url):
                                 data['thong_ke_tong_hop']['tong_dung'] / tong * 100, 1
                             )
                 
+                # Phân tích mới
+                du_doan_moi = phan_tich_voi_engine(danh_sach, loai)
                 data['van_gan_nhat'] = van_gan
-                data['du_doan_van_tiep'] = phan_tich_voi_engine(danh_sach, loai)
+                data['du_doan_van_tiep'] = du_doan_moi
                 data['lan_cap_nhat_truoc'] = van_id
                 data['thoi_gian_cap_nhat'] = datetime.now().strftime('%H:%M:%S')
                 
+                logging.info(f"✅ {loai}: Đã cập nhật - {len(danh_sach)} phiên, Dự đoán: {du_doan_moi.get('khuyen_nghi', 'N/A')}")
+                
         except Exception as e:
-            logging.error(f"Lỗi cập nhật {loai}: {e}")
+            logging.error(f"❌ Lỗi cập nhật {loai}: {e}")
+            import traceback
+            logging.error(traceback.format_exc())
         
         time.sleep(5)
 
@@ -666,8 +686,13 @@ def start_updater(game_key):
     
     khoi_tao_du_lieu()
     
-    threading.Thread(target=cap_nhat_loai, args=('hu', config['hu_url']), daemon=True).start()
-    threading.Thread(target=cap_nhat_loai, args=('md5', config['md5_url']), daemon=True).start()
+    # Khởi động threads
+    thread_hu = threading.Thread(target=cap_nhat_loai, args=('hu', config['hu_url']), daemon=True)
+    thread_md5 = threading.Thread(target=cap_nhat_loai, args=('md5', config['md5_url']), daemon=True)
+    
+    thread_hu.start()
+    thread_md5.start()
+    
     logging.info(f"🔄 Đã chuyển sang game: {config['name']}")
 
 # Khởi động với LC79
@@ -695,7 +720,7 @@ def api_all():
             'van_gan_nhat': data['van_gan_nhat'],
             'thong_ke_tong_hop': data['thong_ke_tong_hop'],
             'thoi_gian_cap_nhat': data['thoi_gian_cap_nhat'],
-            'lich_su_dung_sai': list(data['lich_su_dung_sai'])[-30:]
+            'lich_su_dung_sai': list(data['lich_su_dung_sai'])[-30:] if data['lich_su_dung_sai'] else []
         }
     return jsonify(result)
 
@@ -718,7 +743,7 @@ def switch_game():
         'message': f'Đã chuyển sang {GAME_CONFIG[game_key]["name"]}'
     })
 
-# ======= HTML TEMPLATE (giữ nguyên) =======
+# ======= HTML TEMPLATE =======
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="vi">
@@ -1111,7 +1136,7 @@ body{
     <div class="timeline" id="timeline">
       <div class="empty">
         <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.4"/><path d="M12 8v4l2.5 1.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
-        <span>Đang thu thập dữ liệu...</span>
+        <span>Chưa có dữ liệu</span>
       </div>
     </div>
   </div>
@@ -1123,7 +1148,9 @@ body{
 const GAUGE_CIRC = 534.07;
 
 function updateType(type, data) {
-  if (!data || data.tong_so_van < 5) {
+  console.log('Updating', type, data);
+  
+  if (!data || !data.tong_so_van || data.tong_so_van < 5) {
     document.getElementById(type + '-call').textContent = 'Đang thu thập...';
     return;
   }
@@ -1134,7 +1161,6 @@ function updateType(type, data) {
   const isNoSignal = data.khuyen_nghi === 'NO SIGNAL' || data.khuyen_nghi === 'CHUA_DU_DU_LIEU';
   const prob = isTai ? data.xac_suat_tai : (isXiu ? data.xac_suat_xiu : 0.5);
   const callColor = isTai ? '#3b9eff' : (isXiu ? '#ff4d6d' : (isNoSignal ? '#ffb454' : '#ffb454'));
-  const accentColor = type === 'md5' ? '#3b9eff' : '#ff8c42';
   
   const gauge = document.getElementById(prefix + '-gauge');
   if (gauge) {
@@ -1150,7 +1176,7 @@ function updateType(type, data) {
     callEl.style.color = callColor;
   }
   
-  document.getElementById(prefix + '-conf').textContent = data.do_tin_cay_so + '%';
+  document.getElementById(prefix + '-conf').textContent = (data.do_tin_cay_so || 0) + '%';
   document.getElementById(prefix + '-pct-tai').textContent = (data.xac_suat_tai * 100).toFixed(1) + '%';
   document.getElementById(prefix + '-pct-xiu').textContent = (data.xac_suat_xiu * 100).toFixed(1) + '%';
   document.getElementById(prefix + '-bar-tai').style.width = (data.xac_suat_tai * 100) + '%';
@@ -1159,7 +1185,7 @@ function updateType(type, data) {
   document.getElementById(prefix + '-m-samples').textContent = data.samples || 0;
   document.getElementById(prefix + '-m-exact').textContent = data.exact_samples || 0;
   document.getElementById(prefix + '-m-similar').textContent = data.similar_samples || 0;
-  document.getElementById(prefix + '-m-conf').textContent = data.do_tin_cay_so + '%';
+  document.getElementById(prefix + '-m-conf').textContent = (data.do_tin_cay_so || 0) + '%';
   
   document.getElementById(prefix + '-es-similarity').textContent = (data.similarity_score || 0) + '%';
   document.getElementById(prefix + '-es-history').textContent = data.tong_so_van || 0;
@@ -1239,6 +1265,7 @@ function renderTimeline(history) {
   document.getElementById('hist-count').textContent = history.length + ' ván';
 }
 
+// Game switching
 document.querySelectorAll('.game-btn').forEach(btn => {
   btn.addEventListener('click', async function() {
     const game = this.dataset.game;
@@ -1273,6 +1300,8 @@ async function fetchData() {
     const res = await fetch('/api/all', {cache:'no-store'});
     if (!res.ok) return;
     const data = await res.json();
+    console.log('Data received:', data);
+    
     updateType('hu', data.hu?.du_doan_van_tiep);
     updateType('md5', data.md5?.du_doan_van_tiep);
     updateStats(data);
@@ -1284,11 +1313,14 @@ async function fetchData() {
     if (data.md5?.lich_su_dung_sai) {
       data.md5.lich_su_dung_sai.forEach(h => { h.loai = 'md5'; allHistory.push(h); });
     }
-    allHistory.sort((a,b) => a.thoi_gian.localeCompare(b.thoi_gian));
+    allHistory.sort((a,b) => a.thoi_gian?.localeCompare(b.thoi_gian));
     renderTimeline(allHistory);
-  } catch(e) {}
+  } catch(e) {
+    console.error('Fetch error:', e);
+  }
 }
 
+// Fetch data immediately and every 3 seconds
 fetchData();
 setInterval(fetchData, 3000);
 </script>
