@@ -19,8 +19,9 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ======= CẤU HÌNH GAME =======
-# Token từ trình duyệt
-BEARER_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjb2RlIjowLCJtZXNzYWdlIjoiU3VjY2VzcyIsIm5pY2tOYW1lIjoic2pnZXIzNTMiLCJhY2Nlc3NUb2tlbiI6ImI0MjNkZGIxMTRjNzhhMWM0ZGJhZTQ5NDczMzY0ZGVkIiwiaXNMb2dpbiI6dHJ1ZSwibW9uZXkiOjAsImlkIjoiODY1NjM1OCIsInVzZXJuYW1lIjoia2llbnBoYW0wNjExIiwiaWF0IjoxNzgyNjY4MDMyLCJleHAiOjE3ODI2OTY4MzJ9.bsMIuO1QUwdSxMik_xok7XaDCX0OtB9Ti9zjUCTd7Lk"
+# ======= CẤU HÌNH GAME =======
+# Token mới từ request của bạn
+BEARER_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjb2RlIjowLCJtZXNzYWdlIjoiU3VjY2VzcyIsIm5pY2tOYW1lIjoic2pnZXIzNTMiLCJhY2Nlc3NUb2tlbiI6ImI0MjNkZGIxMTRjNzhhMWM0ZGJhZTQ5NDczMzY0ZGVkIiwiaXNMb2dpbiI6dHJ1ZSwibW9uZXkiOjAsImlkIjoiODY1NjM1OCIsInVzZXJuYW1lIjoia2llbnBoYW0wNjExIiwiaWF0IjoxNzgyNjY4OTI3LCJleHAiOjE3ODI2OTc3Mjd9.Zh26HDILRXHIXUN5pAn0GZj92xvnKraY2XkMKLTGXWs"
 
 GAME_CONFIG = {
     'lc79': {
@@ -44,7 +45,8 @@ GAME_CONFIG = {
             'Sec-Fetch-Site': 'cross-site',
             'Priority': 'u=1, i',
             'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache'
+            'Pragma': 'no-cache',
+            'if-none-match': 'W/"2967-P0MjPxPJWw5FYv93IuLuCatzwWg"'  # Thêm ETag để tránh cache
         }
     },
     'betvip': {
@@ -60,7 +62,26 @@ GAME_CONFIG = {
 current_game = 'lc79'
 
 # ======= DICE HISTORY RETRIEVAL ENGINE =======
-
+def test_api_directly():
+    """Test trực tiếp API để debug"""
+    url = GAME_CONFIG['lc79']['md5_url']
+    headers = GAME_CONFIG['lc79']['headers']
+    
+    try:
+        r = requests.get(url, timeout=30, headers=headers, verify=False)
+        print(f"Status: {r.status_code}")
+        print(f"Headers: {dict(r.headers)}")
+        print(f"Response: {r.text[:500]}")
+        
+        if r.status_code == 200:
+            data = r.json()
+            print(f"Data keys: {data.keys() if isinstance(data, dict) else 'not dict'}")
+            if 'list' in data:
+                print(f"List length: {len(data['list'])}")
+                if len(data['list']) > 0:
+                    print(f"First item: {data['list'][0]}")
+    except Exception as e:
+        print(f"Error: {e}")
 class DiceHistoryEngine:
     def __init__(self):
         self.history = []
