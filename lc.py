@@ -744,6 +744,7 @@ def switch_game():
     })
 
 # ======= HTML TEMPLATE =======
+HTML_TEMPLATE = # ======= HTML TEMPLATE =======
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="vi">
@@ -1148,10 +1149,10 @@ body{
 const GAUGE_CIRC = 534.07;
 
 function updateType(type, data) {
-  console.log(`🔄 Updating ${type}:`, data);
+  console.log('🔄 Updating', type, 'Data:', data);
   
-  // Kiểm tra dữ liệu
-  if (!data || typeof data !== 'object') {
+  // Nếu không có dữ liệu hoặc data rỗng
+  if (!data) {
     document.getElementById(type + '-call').textContent = 'Đang thu thập...';
     return;
   }
@@ -1159,11 +1160,11 @@ function updateType(type, data) {
   // Kiểm tra tong_so_van
   if (!data.tong_so_van || data.tong_so_van < 5) {
     document.getElementById(type + '-call').textContent = 'Đang thu thập...';
-    console.log(`⚠️ ${type}: tong_so_van = ${data.tong_so_van}`);
+    console.log('⚠️ ' + type + ': tong_so_van =', data.tong_so_van);
     return;
   }
   
-  console.log(`✅ ${type}: tong_so_van = ${data.tong_so_van}, Prediction = ${data.khuyen_nghi}`);
+  console.log('✅ ' + type + ': tong_so_van =', data.tong_so_van, 'Prediction:', data.khuyen_nghi);
   
   const prefix = type;
   const isTai = data.khuyen_nghi === 'TAI';
@@ -1315,18 +1316,16 @@ async function fetchData() {
     const data = await res.json();
     console.log('📊 Data received:', data);
     
-    // Kiểm tra và log dữ liệu
-    if (data.hu && data.hu.du_doan_van_tiep) {
-      console.log('✅ HU tong_so_van:', data.hu.du_doan_van_tiep.tong_so_van);
-      console.log('✅ HU Prediction:', data.hu.du_doan_van_tiep.khuyen_nghi);
+    // Cập nhật từng loại
+    if (data.hu) {
+      console.log('✅ HU tong_so_van:', data.hu.du_doan_van_tiep?.tong_so_van);
+      updateType('hu', data.hu.du_doan_van_tiep);
     }
-    if (data.md5 && data.md5.du_doan_van_tiep) {
-      console.log('✅ MD5 tong_so_van:', data.md5.du_doan_van_tiep.tong_so_van);
-      console.log('✅ MD5 Prediction:', data.md5.du_doan_van_tiep.khuyen_nghi);
+    if (data.md5) {
+      console.log('✅ MD5 tong_so_van:', data.md5.du_doan_van_tiep?.tong_so_van);
+      updateType('md5', data.md5.du_doan_van_tiep);
     }
     
-    updateType('hu', data.hu?.du_doan_van_tiep);
-    updateType('md5', data.md5?.du_doan_van_tiep);
     updateStats(data);
     
     const allHistory = [];
