@@ -74,6 +74,7 @@ GAME_CONFIG = {
 }
 
 current_game = 'lc79'
+INITIALIZED = False
 
 # ======= DICE HISTORY RETRIEVAL ENGINE =======
 
@@ -447,26 +448,20 @@ def khoi_tao_du_lieu():
         "hu": DiceHistoryEngine(),
         "md5": DiceHistoryEngine()
     }
-    logging.info("✅ Đã khởi tạo dữ liệu")
-
-khoi_tao_du_lieu()
+    logging.info("✅ Đã khởi tạo cấu trúc dữ liệu")
 
 # ======= LẤY DỮ LIỆU =======
 def lay_toan_bo_lich_su(url):
     """Lấy dữ liệu từ API với headers và params đầy đủ"""
     config = GAME_CONFIG[current_game]
     
-    # Lấy headers từ config
     headers = config.get('headers', DEFAULT_HEADERS.copy())
-    
-    # Lấy params từ config
     params = config.get('params', {})
     
     logging.info(f"🔑 Đang gọi API: {url}")
     
     for attempt in range(3):
         try:
-            # Gọi API với params và headers
             response = requests.get(
                 url, 
                 params=params, 
@@ -514,7 +509,6 @@ def lay_toan_bo_lich_su(url):
             logging.error(f"Lỗi: {e}")
             time.sleep(3)
     
-    # Nếu thất bại, dùng dữ liệu mẫu
     logging.warning("⚠️ Sử dụng dữ liệu mẫu")
     return tao_du_lieu_mau()
 
@@ -605,6 +599,47 @@ def dinh_dang_xuc_xac(van):
         return '-'.join(str(x) for x in xx)
     return str(van.get('point', ''))
 
+# ======= KHỞI TẠO DỮ LIỆU BAN ĐẦU =======
+def khoi_tao_du_lieu_ban_dau():
+    """Khởi tạo dữ liệu ban đầu từ API (đồng bộ)"""
+    global du_lieu, engines, INITIALIZED
+    
+    khoi_tao_du_lieu()
+    
+    config = GAME_CONFIG[current_game]
+    
+    for loai in ['hu', 'md5']:
+        url = config[f'{loai}_url']
+        try:
+            logging.info(f"🔄 Đang khởi tạo {loai}...")
+            danh_sach = lay_toan_bo_lich_su(url)
+            
+            if danh_sach and len(danh_sach) > 0:
+                data = du_lieu[loai]
+                data['toan_bo_lich_su'] = danh_sach
+                van_gan = danh_sach[0]
+                data['van_gan_nhat'] = van_gan
+                
+                engine = engines[loai]
+                engine.build_index(danh_sach)
+                
+                du_doan = phan_tich_voi_engine(danh_sach, loai)
+                data['du_doan_van_tiep'] = du_doan
+                data['lan_cap_nhat_truoc'] = van_gan.get('id')
+                data['thoi_gian_cap_nhat'] = datetime.now().strftime('%H:%M:%S')
+                
+                logging.info(f"✅ Khởi tạo {loai} thành công: {len(danh_sach)} phiên, Dự đoán: {du_doan.get('khuyen_nghi', 'N/A')}")
+            else:
+                logging.warning(f"⚠️ Không có dữ liệu cho {loai}")
+                
+        except Exception as e:
+            logging.error(f"❌ Lỗi khởi tạo {loai}: {e}")
+            import traceback
+            logging.error(traceback.format_exc())
+    
+    INITIALIZED = True
+    logging.info("✅ Đã khởi tạo xong tất cả dữ liệu")
+
 # ======= CẬP NHẬT DỮ LIỆU =======
 def cap_nhat_loai(loai, url):
     """Cập nhật dữ liệu cho loại (hu hoặc md5)"""
@@ -615,7 +650,6 @@ def cap_nhat_loai(loai, url):
     
     while True:
         try:
-            # Lấy dữ liệu từ API
             danh_sach = lay_toan_bo_lich_su(url)
             
             if not danh_sach:
@@ -623,24 +657,20 @@ def cap_nhat_loai(loai, url):
                 time.sleep(5)
                 continue
             
-            # Cập nhật lịch sử
             data['toan_bo_lich_su'] = danh_sach
             van_gan = danh_sach[0]
             van_id = van_gan.get('id')
             
-            # Xây dựng index
             engine.build_index(danh_sach)
             
-            # 🔥 QUAN TRỌNG: Luôn cập nhật dữ liệu
-            # Phân tích mới
-            du_doan_moi = phan_tich_voi_engine(danh_sach, loai)
-            data['van_gan_nhat'] = van_gan
-            data['du_doan_van_tiep'] = du_doan_moi
-            data['lan_cap_nhat_truoc'] = van_id
-            data['thoi_gian_cap_nhat'] = datetime.now().strftime('%H:%M:%S')
-            
-            logging.info(f"✅ {loai}: Đã cập nhật - {len(danh_sach)} phiên, Dự đoán: {du_doan_moi.get('khuyen_nghi', 'N/A')}")
-            logging.info(f"📊 {loai} data check: tong_so_van = {du_doan_moi.get('tong_so_van', 0)}")
+            if data['lan_cap_nhat_truoc'] is None or data['lan_cap_nhat_truoc'] != van_id:
+                du_doan_moi = phan_tich_voi_engine(danh_sach, loai)
+                data['van_gan_nhat'] = van_gan
+                data['du_doan_van_tiep'] = du_doan_moi
+                data['lan_cap_nhat_truoc'] = van_id
+                data['thoi_gian_cap_nhat'] = datetime.now().strftime('%H:%M:%S')
+                
+                logging.info(f"✅ {loai}: Đã cập nhật - {len(danh_sach)} phiên, Dự đoán: {du_doan_moi.get('khuyen_nghi', 'N/A')}")
                 
         except Exception as e:
             logging.error(f"❌ Lỗi cập nhật {loai}: {e}")
@@ -654,9 +684,10 @@ def start_updater(game_key):
     current_game = game_key
     config = GAME_CONFIG[game_key]
     
-    khoi_tao_du_lieu()
+    # Khởi tạo dữ liệu ban đầu (đồng bộ)
+    khoi_tao_du_lieu_ban_dau()
     
-    # Khởi động threads
+    # Khởi động threads cập nhật
     thread_hu = threading.Thread(target=cap_nhat_loai, args=('hu', config['hu_url']), daemon=True)
     thread_md5 = threading.Thread(target=cap_nhat_loai, args=('md5', config['md5_url']), daemon=True)
     
@@ -671,16 +702,32 @@ start_updater('lc79')
 # ======= ROUTES =======
 @app.route('/')
 def index():
-    # Lấy dữ liệu hiện tại
+    """Render trang chính với dữ liệu đã được load"""
+    global du_lieu, INITIALIZED
+    
+    # Đợi dữ liệu được load (tối đa 8 giây)
+    wait_time = 0
+    max_wait = 8
+    
+    while wait_time < max_wait and not INITIALIZED:
+        time.sleep(0.5)
+        wait_time += 0.5
+        logging.info(f"⏳ Đợi dữ liệu khởi tạo... {wait_time}s")
+    
+    # Lấy dữ liệu
     hu_data = du_lieu.get('hu', {}).get('du_doan_van_tiep', {})
     md5_data = du_lieu.get('md5', {}).get('du_doan_van_tiep', {})
+    
+    # Log để debug
+    logging.info(f"📊 HU data: {hu_data.get('tong_so_van', 0) if hu_data else 0} phiên, Prediction: {hu_data.get('khuyen_nghi', 'N/A') if hu_data else 'None'}")
+    logging.info(f"📊 MD5 data: {md5_data.get('tong_so_van', 0) if md5_data else 0} phiên, Prediction: {md5_data.get('khuyen_nghi', 'N/A') if md5_data else 'None'}")
     
     return render_template_string(HTML_TEMPLATE, 
                                  du_lieu=du_lieu, 
                                  game_config=GAME_CONFIG,
                                  current_game=current_game,
-                                 hu_data=hu_data,
-                                 md5_data=md5_data)
+                                 hu_data=hu_data or {},
+                                 md5_data=md5_data or {})
 
 @app.route('/api/du_lieu/<loai>')
 def api_du_lieu(loai):
@@ -1127,6 +1174,9 @@ const INITIAL_MD5_DATA = {{ md5_data|tojson }};
 
 const GAUGE_CIRC = 534.07;
 
+console.log('📊 Initial HU Data:', INITIAL_HU_DATA);
+console.log('📊 Initial MD5 Data:', INITIAL_MD5_DATA);
+
 function updateType(type, data) {
   console.log('🔄 Updating', type, 'Data:', data);
   
@@ -1205,14 +1255,18 @@ function updateType(type, data) {
 
 // Cập nhật ngay khi load trang với dữ liệu từ server
 document.addEventListener('DOMContentLoaded', function() {
-    console.log('📊 Initial HU Data:', INITIAL_HU_DATA);
-    console.log('📊 Initial MD5 Data:', INITIAL_MD5_DATA);
+    console.log('📊 DOM loaded - Initial HU Data:', INITIAL_HU_DATA);
+    console.log('📊 DOM loaded - Initial MD5 Data:', INITIAL_MD5_DATA);
     
-    if (INITIAL_HU_DATA && INITIAL_HU_DATA.tong_so_van) {
+    if (INITIAL_HU_DATA && INITIAL_HU_DATA.tong_so_van && INITIAL_HU_DATA.tong_so_van >= 5) {
         updateType('hu', INITIAL_HU_DATA);
+    } else {
+        console.log('⚠️ HU data not ready yet, will fetch from API');
     }
-    if (INITIAL_MD5_DATA && INITIAL_MD5_DATA.tong_so_van) {
+    if (INITIAL_MD5_DATA && INITIAL_MD5_DATA.tong_so_van && INITIAL_MD5_DATA.tong_so_van >= 5) {
         updateType('md5', INITIAL_MD5_DATA);
+    } else {
+        console.log('⚠️ MD5 data not ready yet, will fetch from API');
     }
 });
 
@@ -1304,12 +1358,12 @@ async function fetchData() {
     console.log('📊 Data received from API:', data);
     
     // Cập nhật từng loại
-    if (data.hu) {
-      console.log('✅ HU tong_so_van:', data.hu.du_doan_van_tiep?.tong_so_van);
+    if (data.hu && data.hu.du_doan_van_tiep) {
+      console.log('✅ HU tong_so_van:', data.hu.du_doan_van_tiep.tong_so_van);
       updateType('hu', data.hu.du_doan_van_tiep);
     }
-    if (data.md5) {
-      console.log('✅ MD5 tong_so_van:', data.md5.du_doan_van_tiep?.tong_so_van);
+    if (data.md5 && data.md5.du_doan_van_tiep) {
+      console.log('✅ MD5 tong_so_van:', data.md5.du_doan_van_tiep.tong_so_van);
       updateType('md5', data.md5.du_doan_van_tiep);
     }
     
@@ -1329,8 +1383,7 @@ async function fetchData() {
   }
 }
 
-// Fetch data immediately and every 3 seconds
-fetchData();
+// Fetch data every 3 seconds
 setInterval(fetchData, 3000);
 </script>
 </body>
@@ -1343,6 +1396,5 @@ if __name__ == '__main__':
     logging.info("🔑 Đã cấu hình Authorization Bearer Token")
     logging.info("📊 Engine phân tích dựa trên lịch sử xúc xắc")
     logging.info(f"🎮 Game hiện tại: {GAME_CONFIG[current_game]['name']}")
-    # Cho Render
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
