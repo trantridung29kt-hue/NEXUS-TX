@@ -1,424 +1,42 @@
 from flask import Flask, render_template_string, jsonify, request
 import requests
 import json
+import threading
 import time
-from collections import deque, defaultdict
+from collections import deque
 import logging
 import math
-from datetime import datetime, timedelta
+from datetime import datetime
+import statistics
 import sys
-import os
-from typing import Dict, List, Tuple, Optional, Any
-import urllib3
-from apscheduler.schedulers.background import BackgroundScheduler
-
-# Tắt cảnh báo SSL
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ======= CẤU HÌNH GAME =======
-# ⚠️ QUAN TRỌNG: Lấy token mới từ trình duyệt
-BEARER_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjb2RlIjowLCJtZXNzYWdlIjoiU3VjY2VzcyIsIm5pY2tOYW1lIjoic2pnZXIzNTMiLCJhY2Nlc3NUb2tlbiI6ImI0MjNkZGIxMTRjNzhhMWM0ZGJhZTQ5NDczMzY0ZGVkIiwiaXNMb2dpbiI6dHJ1ZSwibW9uZXkiOjAsImlkIjoiODY1NjM1OCIsInVzZXJuYW1lIjoia2llbnBoYW0wNjExIiwiaWF0IjoxNzgyNjY4OTI3LCJleHAiOjE3ODI2OTc3Mjd9.Zh26HDILRXHIXUN5pAn0GZj92xvnKraY2XkMKLTGXWs"
-
-# Headers với Authorization
-DEFAULT_HEADERS = {
-    'accept': '*/*',
-    'accept-language': 'en-US,en;q=0.9,vi;q=0.8',
-    'authorization': f'Bearer {BEARER_TOKEN}',
-    'content-type': 'application/json',
-    'origin': 'https://lc79b.bet',
-    'referer': 'https://lc79b.bet/',
-    'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1',
-}
-
 GAME_CONFIG = {
     'lc79': {
         'name': 'LC79',
         'color': '#ff6b35',
-        'md5_url': 'https://wtxmd52.tele68.com/v1/txmd5/sessions',
-        'hu_url': 'https://wtx.tele68.com/v1/tx/sessions',
+        'md5_url': 'https://wtxmd52.tele68.com/v1/txmd5/sessions?cp=R&cl=R&pf=web&at=7e3955a9b92d0a12a675097596748258',
+        'hu_url': 'https://wtx.tele68.com/v1/tx/sessions?cp=R&cl=R&pf=web&at=4a79fe6ffe00c22102db76778b434c50',
         'bet_url': 'https://lc79.bet',
-        'active': True,
-        'params': {
-            'cp': 'R',
-            'cl': 'R',
-            'pf': 'web',
-            'at': 'b423ddb114c78a1c4dbae49473364ded'
-        },
-        'headers': DEFAULT_HEADERS.copy()
+        'active': True
     },
     'betvip': {
         'name': 'BETVIP',
         'color': '#8b6cff',
-        'md5_url': 'https://wtxmd52.macminim6.online/v1/txmd5/sessions',
-        'hu_url': 'https://wtx.macminim6.online/v1/tx/sessions',
+        'md5_url': 'https://wtxmd52.macminim6.online/v1/txmd5/sessions?cp=R&cl=R&pf=web&at=f5252fdaf1287cdbfdc6de625acf5611',
+        'hu_url': 'https://wtx.macminim6.online/v1/tx/sessions?cp=R&cl=R&pf=web&at=f5252fdaf1287cdbfdc6de625acf5611',
         'bet_url': 'https://betvip.com',
-        'active': False,  # Tạm tắt BETVIP vì bị chặn
-        'params': {
-            'cp': 'R',
-            'cl': 'R',
-            'pf': 'web',
-            'at': 'f5252fdaf1287cdbfdc6de625acf5611'
-        },
-        'headers': {}
+        'active': True
     }
 }
 
-current_game = 'lc79'  # Chuyển sang LC79
-INITIALIZED = False
-
-# Hàm lấy thời gian Việt Nam
-def get_vietnam_time():
-    return datetime.utcnow() + timedelta(hours=7)
-
-# ======= DICE HISTORY RETRIEVAL ENGINE =======
-
-class DiceHistoryEngine:
-    def __init__(self):
-        self.history = []
-        self.index_by_dice = defaultdict(list)
-        self.index_by_sum = defaultdict(list)
-        self.index_by_type = defaultdict(list)
-        self.last_update = None
-        self.total_samples = 0
-        self.session_ids = set()
-        
-    def get_dice_key(self, dices: List[int]) -> str:
-        if not dices:
-            return ""
-        return "-".join(str(d) for d in sorted(dices))
-    
-    def get_dice_sum(self, dices: List[int]) -> int:
-        return sum(dices) if dices else 0
-    
-    def get_dice_type(self, dices: List[int]) -> str:
-        if not dices:
-            return "unknown"
-        unique = set(dices)
-        if len(unique) == 1:
-            return "triple"
-        elif len(unique) == 2:
-            return "pair"
-        else:
-            return "mixed"
-    
-    def get_parity_pattern(self, dices: List[int]) -> str:
-        if not dices:
-            return ""
-        return "".join("E" if d % 2 == 0 else "O" for d in sorted(dices))
-    
-    def get_high_low_pattern(self, dices: List[int]) -> str:
-        if not dices:
-            return ""
-        return "".join("H" if d >= 4 else "L" for d in sorted(dices))
-    
-    def build_index(self, sessions: List[Dict]):
-        self.history = sessions
-        self.index_by_dice.clear()
-        self.index_by_sum.clear()
-        self.index_by_type.clear()
-        self.session_ids.clear()
-        
-        for session in sessions:
-            session_id = session.get('id')
-            if session_id:
-                self.session_ids.add(session_id)
-            
-            dices = session.get('dices', [])
-            if not dices:
-                continue
-                
-            dice_key = self.get_dice_key(dices)
-            dice_sum = self.get_dice_sum(dices)
-            dice_type = self.get_dice_type(dices)
-            
-            self.index_by_dice[dice_key].append(session)
-            self.index_by_sum[dice_sum].append(session)
-            self.index_by_type[dice_type].append(session)
-        
-        self.total_samples = len(sessions)
-        self.last_update = datetime.now()
-        logging.info(f"📊 Đã xây dựng index: {len(sessions)} phiên")
-    
-    def calculate_similarity_score(self, target_dices: List[int], matched_dices: List[int]) -> float:
-        if not target_dices or not matched_dices:
-            return 0.0
-            
-        target_sorted = sorted(target_dices)
-        matched_sorted = sorted(matched_dices)
-        
-        if target_sorted == matched_sorted:
-            return 1.0
-        
-        if (sum(target_dices) == sum(matched_dices) and 
-            self.get_dice_type(target_dices) == self.get_dice_type(matched_dices)):
-            return 0.9
-        
-        common = set(target_sorted) & set(matched_sorted)
-        if len(common) >= 2:
-            return 0.8
-        
-        if sum(target_dices) == sum(matched_dices):
-            return 0.7
-        
-        if self.get_dice_type(target_dices) == self.get_dice_type(matched_dices):
-            return 0.6
-        
-        if self.get_parity_pattern(target_dices) == self.get_parity_pattern(matched_dices):
-            return 0.5
-        
-        if self.get_high_low_pattern(target_dices) == self.get_high_low_pattern(matched_dices):
-            return 0.4
-            
-        return 0.0
-    
-    def find_matches(self, target_session: Dict) -> Dict:
-        target_dices = target_session.get('dices', [])
-        if not target_dices:
-            return {'exact_matches': [], 'similar_matches': [], 'all_matches': []}
-        
-        target_key = self.get_dice_key(target_dices)
-        target_sum = self.get_dice_sum(target_dices)
-        target_type = self.get_dice_type(target_dices)
-        target_id = target_session.get('id')
-        
-        exact_matches = []
-        similar_matches = []
-        all_matches = []
-        seen_ids = set()
-        
-        exact = self.index_by_dice.get(target_key, [])
-        for session in exact:
-            session_id = session.get('id')
-            if session_id and session_id != target_id:
-                if session_id not in seen_ids:
-                    seen_ids.add(session_id)
-                    exact_matches.append(session)
-                    all_matches.append(session)
-        
-        for session in self.index_by_sum.get(target_sum, []):
-            session_id = session.get('id')
-            if session_id and session_id != target_id and session_id not in seen_ids:
-                if self.get_dice_type(session.get('dices', [])) == target_type:
-                    seen_ids.add(session_id)
-                    similar_matches.append(session)
-                    all_matches.append(session)
-        
-        for session in self.index_by_sum.get(target_sum, []):
-            session_id = session.get('id')
-            if session_id and session_id != target_id and session_id not in seen_ids:
-                seen_ids.add(session_id)
-                similar_matches.append(session)
-                all_matches.append(session)
-        
-        for session in self.index_by_type.get(target_type, []):
-            session_id = session.get('id')
-            if session_id and session_id != target_id and session_id not in seen_ids:
-                seen_ids.add(session_id)
-                similar_matches.append(session)
-                all_matches.append(session)
-        
-        for session in self.history:
-            session_id = session.get('id')
-            if not session_id or session_id == target_id or session_id in seen_ids:
-                continue
-            
-            session_dices = session.get('dices', [])
-            similarity = self.calculate_similarity_score(target_dices, session_dices)
-            if similarity >= 0.5:
-                seen_ids.add(session_id)
-                similar_matches.append(session)
-                all_matches.append(session)
-        
-        return {
-            'exact_matches': exact_matches,
-            'similar_matches': similar_matches,
-            'all_matches': all_matches
-        }
-    
-    def get_next_session(self, session: Dict) -> Optional[Dict]:
-        current_id = session.get('id')
-        if not current_id:
-            return None
-        
-        for i, s in enumerate(self.history):
-            if s.get('id') == current_id and i > 0:
-                return self.history[i-1]
-        return None
-    
-    def calculate_average_similarity(self, target_dices: List[int], matches: List[Dict]) -> float:
-        if not matches:
-            return 0.0
-        
-        total = 0.0
-        for match in matches:
-            match_dices = match.get('dices', [])
-            similarity = self.calculate_similarity_score(target_dices, match_dices)
-            total += similarity
-        
-        return total / len(matches)
-    
-    def calculate_stability(self, matches: List[Dict]) -> float:
-        if len(matches) < 3:
-            return 0.0
-        
-        results = []
-        for match in matches:
-            next_session = self.get_next_session(match)
-            if next_session:
-                results.append(next_session.get('resultTruyenThong', ''))
-        
-        if not results:
-            return 0.0
-        
-        tai_count = results.count('TAI')
-        xiu_count = results.count('XIU')
-        total = len(results)
-        
-        if total == 0:
-            return 0.0
-        
-        return max(tai_count, xiu_count) / total
-    
-    def analyze(self, target_session: Dict, min_samples: int = 5) -> Dict:
-        target_dices = target_session.get('dices', [])
-        if not target_dices:
-            return self.get_empty_result(target_session)
-        
-        matches = self.find_matches(target_session)
-        exact_matches = matches['exact_matches']
-        similar_matches = matches['similar_matches']
-        all_matches = matches['all_matches']
-        
-        if len(all_matches) < min_samples:
-            return {
-                'prediction': 'NO SIGNAL',
-                'probability': 0.0,
-                'confidence': 0.0,
-                'samples': len(all_matches),
-                'exact_samples': len(exact_matches),
-                'similar_samples': len(similar_matches),
-                'history_size': self.total_samples,
-                'similarity_score': 0.0,
-                'last_dice': target_dices,
-                'signal': 'NO_SIGNAL'
-            }
-        
-        tai_count = 0
-        xiu_count = 0
-        weighted_tai = 0.0
-        weighted_xiu = 0.0
-        total_weight = 0.0
-        
-        for session in exact_matches:
-            next_session = self.get_next_session(session)
-            if next_session:
-                next_result = next_session.get('resultTruyenThong', '')
-                if next_result == 'TAI':
-                    tai_count += 1
-                    weighted_tai += 1.0
-                elif next_result == 'XIU':
-                    xiu_count += 1
-                    weighted_xiu += 1.0
-                total_weight += 1.0
-        
-        for session in similar_matches:
-            session_id = session.get('id')
-            is_in_exact = any(s.get('id') == session_id for s in exact_matches)
-            if is_in_exact:
-                continue
-                
-            next_session = self.get_next_session(session)
-            if next_session:
-                next_result = next_session.get('resultTruyenThong', '')
-                similarity = self.calculate_similarity_score(target_dices, session.get('dices', []))
-                
-                if next_result == 'TAI':
-                    tai_count += 1
-                    weighted_tai += similarity
-                elif next_result == 'XIU':
-                    xiu_count += 1
-                    weighted_xiu += similarity
-                total_weight += similarity
-        
-        total_samples = tai_count + xiu_count
-        
-        if total_samples < min_samples or total_weight == 0:
-            return {
-                'prediction': 'NO SIGNAL',
-                'probability': 0.0,
-                'confidence': 0.0,
-                'samples': total_samples,
-                'exact_samples': len(exact_matches),
-                'similar_samples': len(similar_matches),
-                'history_size': self.total_samples,
-                'similarity_score': 0.0,
-                'last_dice': target_dices,
-                'signal': 'NO_SIGNAL'
-            }
-        
-        prob_tai = weighted_tai / total_weight if total_weight > 0 else 0.0
-        prob_xiu = weighted_xiu / total_weight if total_weight > 0 else 0.0
-        
-        sample_ratio = min(1.0, total_samples / 50)
-        similarity_avg = self.calculate_average_similarity(target_dices, all_matches)
-        stability = self.calculate_stability(all_matches)
-        
-        confidence = (sample_ratio * 0.4 + similarity_avg * 0.3 + stability * 0.3) * 100
-        
-        if stability < 0.6:
-            confidence *= 0.8
-        
-        exact_ratio = len(exact_matches) / max(1, total_samples)
-        if exact_ratio > 0.3:
-            confidence = min(100, confidence * 1.1)
-        
-        confidence = min(100, max(0, confidence))
-        
-        if prob_tai > 0.52 and confidence > 60:
-            prediction = 'TAI'
-        elif prob_xiu > 0.52 and confidence > 60:
-            prediction = 'XIU'
-        else:
-            prediction = 'CÂN NHẮC' if confidence > 50 else 'NO SIGNAL'
-        
-        return {
-            'prediction': prediction,
-            'probability': max(prob_tai, prob_xiu) * 100,
-            'confidence': round(confidence, 1),
-            'samples': total_samples,
-            'exact_samples': len(exact_matches),
-            'similar_samples': len(similar_matches),
-            'history_size': self.total_samples,
-            'similarity_score': round(similarity_avg * 100, 1),
-            'last_dice': target_dices,
-            'prob_tai': round(prob_tai * 100, 1),
-            'prob_xiu': round(prob_xiu * 100, 1),
-            'tai_count': tai_count,
-            'xiu_count': xiu_count,
-            'signal': prediction if prediction != 'NO SIGNAL' else 'NO_SIGNAL'
-        }
-    
-    def get_empty_result(self, target_session: Dict) -> Dict:
-        return {
-            'prediction': 'NO SIGNAL',
-            'probability': 0.0,
-            'confidence': 0.0,
-            'samples': 0,
-            'exact_samples': 0,
-            'similar_samples': 0,
-            'history_size': self.total_samples,
-            'similarity_score': 0.0,
-            'last_dice': target_session.get('dices', []),
-            'signal': 'NO_SIGNAL'
-        }
+# Game hiện tại
+current_game = 'betvip'  # Mặc định là BETVIP
 
 # ======= CẤU TRÚC DỮ LIỆU =======
-du_lieu = {}
-engines = {}
-
 def tao_cau_truc_loai():
     return {
         "toan_bo_lich_su": [],
@@ -432,74 +50,349 @@ def tao_cau_truc_loai():
             "tong_dung": 0,
             "tong_sai": 0,
             "ty_le_thang": 0
+        },
+        "hieu_suat_phuong_phap": {
+            "markov": deque(maxlen=50),
+            "fft": deque(maxlen=50),
+            "ml": deque(maxlen=50),
+            "bayes": deque(maxlen=50),
+            "pattern": deque(maxlen=50)
         }
     }
 
+du_lieu = {}
 def khoi_tao_du_lieu():
-    global du_lieu, engines
+    global du_lieu
     du_lieu = {
         "hu": tao_cau_truc_loai(),
         "md5": tao_cau_truc_loai()
     }
-    engines = {
-        "hu": DiceHistoryEngine(),
-        "md5": DiceHistoryEngine()
-    }
-    logging.info("✅ Đã khởi tạo cấu trúc dữ liệu")
+
+khoi_tao_du_lieu()
 
 # ======= LẤY DỮ LIỆU =======
 def lay_toan_bo_lich_su(url):
-    """Lấy dữ liệu từ API với Authorization Bearer Token"""
-    config = GAME_CONFIG[current_game]
-    headers = config.get('headers', DEFAULT_HEADERS.copy())
-    params = config.get('params', {})
-    
-    try:
-        response = requests.get(url, params=params, headers=headers, timeout=30, verify=False)
-        
-        if response.status_code == 200:
-            data = response.json()
+    for attempt in range(3):
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            r = requests.get(url, timeout=5, headers=headers)
+            r.raise_for_status()
+            data = r.json()
             if 'list' in data and len(data['list']) > 0:
                 return data['list']
-        elif response.status_code == 403:
-            logging.error("❌ Lỗi 403 - Token hết hạn! Cần lấy token mới")
-    except Exception as e:
-        logging.error(f"Lỗi lấy dữ liệu: {e}")
-    
-    return None
+        except requests.exceptions.RequestException as e:
+            logging.warning(f"Attempt {attempt+1}/3 failed for {url}: {e}")
+            if attempt < 2:
+                time.sleep(2)
+        except Exception as e:
+            logging.error(f"Unexpected error: {e}")
+            if attempt < 2:
+                time.sleep(2)
+    return []
 
-def phan_tich_voi_engine(danh_sach, loai):
-    if not danh_sach or len(danh_sach) < 5:
+# ======= 5 PHƯƠNG PHÁP PHÂN TÍCH =======
+def phan_tich_5_phuong_phap(danh_sach, loai=""):
+    if not danh_sach or len(danh_sach) < 15:
         return tao_du_doan_mac_dinh(danh_sach, loai)
-    
-    engine = engines.get(loai)
-    if not engine:
-        return tao_du_doan_mac_dinh(danh_sach, loai)
-    
-    if engine.total_samples != len(danh_sach):
-        engine.build_index(danh_sach)
     
     van_hien_tai = danh_sach[0]
-    result = engine.analyze(van_hien_tai)
+    lich_su = danh_sach[1:]
+    
+    ket_qua = [p['resultTruyenThong'] for p in lich_su]
+    diem = [p['point'] for p in lich_su]
+    tong_van = len(ket_qua)
+    
+    mang_so = [1 if k == 'TAI' else 0 for k in ket_qua]
+    
+    def markov_bac_3_can_bang(mang):
+        if len(mang) < 5:
+            return 0.5
+        
+        pattern = tuple(mang[:3])
+        dem_tai = 0
+        dem_xiu = 0
+        
+        for i in range(len(mang) - 3):
+            if tuple(mang[i:i+3]) == pattern:
+                if i + 3 < len(mang):
+                    if mang[i+3] == 1:
+                        dem_tai += 1
+                    else:
+                        dem_xiu += 1
+        
+        tong = dem_tai + dem_xiu
+        if tong > 0:
+            return dem_tai / tong
+        return 0.5
+    
+    p_markov = markov_bac_3_can_bang(mang_so)
+    
+    def phat_hien_chu_ky_can_bang(mang):
+        if len(mang) < 15:
+            return 0.5
+        
+        chu_ky_tot_nhat = 2
+        do_chinh_xac_cao_nhat = 0
+        
+        for chu_ky in range(2, min(11, len(mang)//2)):
+            dung = 0
+            tong = 0
+            for i in range(len(mang) - chu_ky):
+                if mang[i] == mang[i + chu_ky]:
+                    dung += 1
+                tong += 1
+            
+            do_chinh_xac = dung / tong if tong > 0 else 0
+            if do_chinh_xac > do_chinh_xac_cao_nhat:
+                do_chinh_xac_cao_nhat = do_chinh_xac
+                chu_ky_tot_nhat = chu_ky
+        
+        if do_chinh_xac_cao_nhat > 0.55:
+            vi_tri = len(mang) % chu_ky_tot_nhat
+            if vi_tri < len(mang):
+                return mang[vi_tri]
+        
+        return 0.5
+    
+    p_chu_ky = phat_hien_chu_ky_can_bang(mang_so)
+    
+    def ml_don_gian_can_bang(mang, diem):
+        if len(mang) < 15:
+            return 0.5
+        
+        features = []
+        labels = []
+        
+        for i in range(len(mang) - 5):
+            f = [
+                sum(mang[i:i+5]) / 5,
+                sum(mang[max(0,i-5):i+1]) / min(6, i+1),
+                diem[i] / 18 if i < len(diem) else 0.5,
+                statistics.mean(mang[max(0,i-10):i+1]) if i >= 5 else 0.5
+            ]
+            features.append(f)
+            labels.append(mang[i+5])
+        
+        if len(features) < 5:
+            return 0.5
+        
+        def hoi_quy(X, y):
+            n = len(X)
+            if n == 0:
+                return [0, 0, 0, 0], 0
+            X_mean = [sum(x[j] for x in X)/n for j in range(4)]
+            y_mean = sum(y)/n
+            
+            tu_so = [0, 0, 0, 0]
+            mau_so = [0, 0, 0, 0]
+            
+            for i in range(n):
+                for j in range(4):
+                    tu_so[j] += (X[i][j] - X_mean[j]) * (y[i] - y_mean)
+                    mau_so[j] += (X[i][j] - X_mean[j]) ** 2
+            
+            he_so = [tu_so[j] / (mau_so[j] + 0.001) for j in range(4)]
+            intercept = y_mean - sum(he_so[j] * X_mean[j] for j in range(4))
+            
+            return he_so, intercept
+        
+        he_so, intercept = hoi_quy(features, labels)
+        
+        feature_moi = [
+            sum(mang[-5:]) / 5,
+            sum(mang[-6:]) / 6,
+            diem[0] / 18 if diem else 0.5,
+            statistics.mean(mang[-10:]) if len(mang) >= 10 else 0.5
+        ]
+        
+        du_doan = intercept + sum(he_so[j] * feature_moi[j] for j in range(4))
+        return max(0.1, min(0.9, du_doan))
+    
+    p_ml = ml_don_gian_can_bang(mang_so, diem)
+    
+    def bayesian_can_bang(diem, ket_qua):
+        if len(diem) < 10:
+            return 0.5
+        
+        diem_tai = [d for d, k in zip(diem, ket_qua) if k == 'TAI']
+        diem_xiu = [d for d, k in zip(diem, ket_qua) if k == 'XIU']
+        
+        if not diem_tai or not diem_xiu:
+            return 0.5
+        
+        tb_tai = statistics.mean(diem_tai)
+        tb_xiu = statistics.mean(diem_xiu)
+        std_tai = statistics.stdev(diem_tai) if len(diem_tai) > 1 else 1
+        std_xiu = statistics.stdev(diem_xiu) if len(diem_xiu) > 1 else 1
+        
+        p_prior_tai = len(diem_tai) / len(diem)
+        p_prior_xiu = len(diem_xiu) / len(diem)
+        
+        diem_hien_tai = diem[0] if diem else 10.5
+        
+        def normal_pdf(x, mean, std):
+            if std == 0:
+                return 0
+            return (1/(std * math.sqrt(2*math.pi))) * math.exp(-0.5*((x-mean)/std)**2)
+        
+        likelihood_tai = normal_pdf(diem_hien_tai, tb_tai, std_tai)
+        likelihood_xiu = normal_pdf(diem_hien_tai, tb_xiu, std_xiu)
+        
+        posterior_tai = likelihood_tai * p_prior_tai
+        posterior_xiu = likelihood_xiu * p_prior_xiu
+        
+        tong = posterior_tai + posterior_xiu
+        if tong > 0:
+            return posterior_tai / tong
+        return 0.5
+    
+    p_bayes = bayesian_can_bang(diem, ket_qua)
+    
+    def pattern_matching_can_bang(mang, window=5):
+        if len(mang) < window * 2:
+            return 0.5
+        
+        pattern_hien_tai = mang[:window]
+        ket_qua_pattern = []
+        
+        for i in range(len(mang) - window):
+            pattern_cu = mang[i:i+window]
+            khop = sum(1 for a, b in zip(pattern_hien_tai, pattern_cu) if a == b)
+            ty_le_khop = khop / window
+            
+            if ty_le_khop >= 0.6 and i + window < len(mang):
+                ket_qua_pattern.append((ty_le_khop, mang[i+window]))
+        
+        if ket_qua_pattern:
+            tong_trong_so = sum(k[0] for k in ket_qua_pattern)
+            if tong_trong_so > 0:
+                du_doan = sum(k[0] * k[1] for k in ket_qua_pattern) / tong_trong_so
+                return du_doan
+        
+        return 0.5
+    
+    p_pattern = pattern_matching_can_bang(mang_so)
+    
+    def tinh_trong_so_dong(loai):
+        hieu_suat = du_lieu[loai]['hieu_suat_phuong_phap'] if loai in du_lieu else None
+        
+        trong_so_mac_dinh = {
+            'markov': 0.20,
+            'fft': 0.15,
+            'ml': 0.25,
+            'bayes': 0.20,
+            'pattern': 0.20
+        }
+        
+        if not hieu_suat:
+            return trong_so_mac_dinh
+        
+        tong_mau = sum(len(v) for v in hieu_suat.values())
+        if tong_mau < 30:
+            return trong_so_mac_dinh
+        
+        diem_phuong_phap = {}
+        for ten, lich_su in hieu_suat.items():
+            if len(lich_su) > 0:
+                ty_le_dung = sum(1 for x in lich_su if x) / len(lich_su)
+                he_so_tin_cay = min(1, len(lich_su) / 20)
+                diem_phuong_phap[ten] = ty_le_dung * he_so_tin_cay
+            else:
+                diem_phuong_phap[ten] = 0.5
+        
+        tong_diem = sum(diem_phuong_phap.values())
+        if tong_diem > 0:
+            trong_so = {k: v/tong_diem for k, v in diem_phuong_phap.items()}
+            return trong_so
+        
+        return trong_so_mac_dinh
+    
+    w = tinh_trong_so_dong(loai)
+    
+    p_tai = (
+        p_markov * w.get('markov', 0.20) +
+        p_chu_ky * w.get('fft', 0.15) +
+        p_ml * w.get('ml', 0.25) +
+        p_bayes * w.get('bayes', 0.20) +
+        p_pattern * w.get('pattern', 0.20)
+    )
+    
+    p_tai = max(0.05, min(0.95, p_tai))
+    p_xiu = 1 - p_tai
+    
+    if loai == 'md5':
+        nguong = 0.58
+        nguong_can_nhac = 0.52
+    else:
+        nguong = 0.53
+        nguong_can_nhac = 0.50
+    
+    chenh_lech = abs(p_tai - 0.5)
+    do_tin_cay_co_so = min(95, 25 + chenh_lech * 300 + (tong_van / 20))
+    
+    if loai == 'md5':
+        lich_su_gan_day = list(du_lieu[loai]['lich_su_dung_sai'])[-20:]
+        if len(lich_su_gan_day) >= 10:
+            ty_le_gan_day = sum(1 for x in lich_su_gan_day if x['dung']) / len(lich_su_gan_day)
+            if ty_le_gan_day < 0.4:
+                nguong = max(nguong, 0.62)
+                do_tin_cay_co_so = max(10, do_tin_cay_co_so - 20)
+    
+    if p_tai >= nguong:
+        khuyen = 'TAI'
+        do_tin = 'Cao' if p_tai >= 0.65 else 'Trung bình'
+    elif p_xiu >= nguong:
+        khuyen = 'XIU'
+        do_tin = 'Cao' if p_xiu >= 0.65 else 'Trung bình'
+    elif chenh_lech < nguong_can_nhac:
+        khuyen = 'CAN_NHAC'
+        do_tin = 'Thap'
+    else:
+        khuyen = 'THAN_TRONG'
+        do_tin = 'Thap'
+    
+    chuoi = [van_hien_tai['resultTruyenThong']] + ket_qua
+    chuoi_hien_tai = 1
+    for i in range(1, len(chuoi)):
+        if chuoi[i] == chuoi[i-1]:
+            chuoi_hien_tai += 1
+        else:
+            break
+    
+    so_tai = ket_qua.count('TAI')
+    so_xiu = ket_qua.count('XIU')
+    
+    cac_pp = [
+        ('Markov Bậc 3', p_markov, w.get('markov', 0.20)),
+        ('Phân Tích Chu Kỳ', p_chu_ky, w.get('fft', 0.15)),
+        ('Machine Learning', p_ml, w.get('ml', 0.25)),
+        ('Bayesian Điểm Số', p_bayes, w.get('bayes', 0.20)),
+        ('Pattern Matching', p_pattern, w.get('pattern', 0.20))
+    ]
+    
+    pp_manh_nhat = max(cac_pp, key=lambda x: abs(x[1] - 0.5))
     
     return {
-        'khuyen_nghi': result['prediction'],
-        'xac_suat_tai': result.get('prob_tai', 0) / 100,
-        'xac_suat_xiu': result.get('prob_xiu', 0) / 100,
-        'do_tin_cay': 'Cao' if result['confidence'] > 75 else 'Trung bình' if result['confidence'] > 50 else 'Thấp',
-        'do_tin_cay_so': result['confidence'],
+        'khuyen_nghi': khuyen,
+        'xac_suat_tai': round(p_tai, 4),
+        'xac_suat_xiu': round(p_xiu, 4),
+        'do_tin_cay': do_tin,
+        'do_tin_cay_so': round(do_tin_cay_co_so, 1),
         'van_gan_nhat': van_hien_tai,
-        'ket_qua_hien_tai': van_hien_tai.get('resultTruyenThong', ''),
-        'tong_so_van': result['history_size'],
-        'so_tai': result.get('tai_count', 0),
-        'so_xiu': result.get('xiu_count', 0),
-        'chieu_dai_chuoi': 0,
-        'exact_samples': result['exact_samples'],
-        'similar_samples': result['similar_samples'],
-        'similarity_score': result['similarity_score'],
-        'samples': result['samples'],
-        'last_dice': result.get('last_dice', []),
-        'signal': result.get('signal', 'NO_SIGNAL')
+        'chieu_dai_chuoi': chuoi_hien_tai,
+        'ket_qua_hien_tai': van_hien_tai['resultTruyenThong'],
+        'tong_so_van': tong_van,
+        'so_tai': so_tai,
+        'so_xiu': so_xiu,
+        'p_markov': p_markov,
+        'p_chu_ky': p_chu_ky,
+        'p_ml': p_ml,
+        'p_bayes': p_bayes,
+        'p_pattern': p_pattern,
+        'trong_so': w,
+        'nguong': nguong
     }
 
 def tao_du_doan_mac_dinh(danh_sach, loai=""):
@@ -509,21 +402,40 @@ def tao_du_doan_mac_dinh(danh_sach, loai=""):
         'xac_suat_tai': 0.5,
         'xac_suat_xiu': 0.5,
         'do_tin_cay': 'Thap',
-        'do_tin_cay_so': 0,
+        'do_tin_cay_so': 10,
         'van_gan_nhat': van_gan,
-        'ket_qua_hien_tai': van_gan.get('resultTruyenThong') if van_gan else None,
-        'tong_so_van': len(danh_sach) if danh_sach else 0,
+        'chieu_dai_chuoi': 0,
+        'ket_qua_hien_tai': van_gan['resultTruyenThong'] if van_gan else None,
+        'tong_so_van': len(danh_sach),
         'so_tai': 0,
         'so_xiu': 0,
-        'chieu_dai_chuoi': 0,
-        'exact_samples': 0,
-        'similar_samples': 0,
-        'similarity_score': 0,
-        'samples': 0,
-        'last_dice': [],
-        'signal': 'NO_SIGNAL'
+        'p_markov': 0.5, 'p_chu_ky': 0.5, 'p_ml': 0.5,
+        'p_bayes': 0.5, 'p_pattern': 0.5,
+        'trong_so': {'markov':0.20, 'fft':0.15, 'ml':0.25, 'bayes':0.20, 'pattern':0.20},
+        'nguong': 0.58 if loai == 'md5' else 0.53
     }
 
+# ======= CẬP NHẬT HIỆU SUẤT =======
+def cap_nhat_hieu_suat(du_doan, ket_qua_thuc, loai):
+    if not du_doan or ket_qua_thuc not in ['TAI', 'XIU']:
+        return
+    
+    ket_qua_so = 1 if ket_qua_thuc == 'TAI' else 0
+    hieu_suat = du_lieu[loai]['hieu_suat_phuong_phap']
+    
+    methods = [
+        ('markov', du_doan.get('p_markov', 0.5)),
+        ('fft', du_doan.get('p_chu_ky', 0.5)),
+        ('ml', du_doan.get('p_ml', 0.5)),
+        ('bayes', du_doan.get('p_bayes', 0.5)),
+        ('pattern', du_doan.get('p_pattern', 0.5))
+    ]
+    
+    for name, p in methods:
+        du_doan_pp = 1 if p >= 0.5 else 0
+        hieu_suat[name].append(du_doan_pp == ket_qua_so)
+
+# ======= HÀM ĐỊNH DẠNG XÚC XẮC =======
 def dinh_dang_xuc_xac(van):
     if not van:
         return ''
@@ -533,79 +445,106 @@ def dinh_dang_xuc_xac(van):
     return str(van.get('point', ''))
 
 # ======= CẬP NHẬT DỮ LIỆU =======
-def cap_nhat_du_lieu():
-    """Cập nhật dữ liệu - được gọi bởi scheduler"""
-    global du_lieu, INITIALIZED
+def cap_nhat_loai(loai, url):
+    data = du_lieu[loai]
     
-    logging.info("🔄 Đang cập nhật dữ liệu...")
-    
-    config = GAME_CONFIG[current_game]
-    
-    for loai in ['hu', 'md5']:
+    while True:
         try:
-            url = config[f'{loai}_url']
             danh_sach = lay_toan_bo_lich_su(url)
+            if not danh_sach:
+                time.sleep(2)
+                continue
             
-            if danh_sach and len(danh_sach) > 0:
-                data = du_lieu[loai]
-                data['toan_bo_lich_su'] = danh_sach
-                van_gan = danh_sach[0]
+            data['toan_bo_lich_su'] = danh_sach
+            van_gan = danh_sach[0]
+            van_id = van_gan.get('id')
+            
+            if data['lan_cap_nhat_truoc'] is None or data['lan_cap_nhat_truoc'] != van_id:
+                if data['du_doan_van_tiep'] and data['van_gan_nhat']:
+                    du_doan_cu = data['du_doan_van_tiep']['khuyen_nghi']
+                    ket_qua_thuc = van_gan.get('resultTruyenThong')
+                    
+                    if du_doan_cu in ['TAI', 'XIU'] and ket_qua_thuc:
+                        dung = (du_doan_cu == ket_qua_thuc)
+                        data['lich_su_dung_sai'].append({
+                            'du_doan': du_doan_cu,
+                            'ket_qua': ket_qua_thuc,
+                            'dung': dung,
+                            'diem': van_gan.get('point'),
+                            'xuc_xac': dinh_dang_xuc_xac(van_gan),
+                            'thoi_gian': datetime.now().strftime('%H:%M:%S')
+                        })
+                        
+                        data['thong_ke_tong_hop']['tong_du_doan'] += 1
+                        if dung:
+                            data['thong_ke_tong_hop']['tong_dung'] += 1
+                        else:
+                            data['thong_ke_tong_hop']['tong_sai'] += 1
+                        
+                        tong = data['thong_ke_tong_hop']['tong_du_doan']
+                        if tong > 0:
+                            data['thong_ke_tong_hop']['ty_le_thang'] = round(
+                                data['thong_ke_tong_hop']['tong_dung'] / tong * 100, 1
+                            )
+                        
+                        cap_nhat_hieu_suat(data['du_doan_van_tiep'], ket_qua_thuc, loai)
+                
                 data['van_gan_nhat'] = van_gan
+                data['du_doan_van_tiep'] = phan_tich_5_phuong_phap(danh_sach, loai)
+                data['lan_cap_nhat_truoc'] = van_id
+                data['thoi_gian_cap_nhat'] = datetime.now().strftime('%H:%M:%S')
                 
-                engine = engines[loai]
-                engine.build_index(danh_sach)
-                
-                du_doan = phan_tich_voi_engine(danh_sach, loai)
-                data['du_doan_van_tiep'] = du_doan
-                data['lan_cap_nhat_truoc'] = van_gan.get('id')
-                data['thoi_gian_cap_nhat'] = get_vietnam_time().strftime('%H:%M:%S')
-                
-                logging.info(f"✅ Cập nhật {loai}: {len(danh_sach)} phiên, Dự đoán: {du_doan.get('khuyen_nghi', 'N/A')}")
         except Exception as e:
-            logging.error(f"❌ Lỗi cập nhật {loai}: {e}")
+            logging.error(f"Lỗi cập nhật {loai}: {e}")
+        
+        time.sleep(2)
+
+def start_updater(game_key):
+    """Khởi động updater cho game được chọn"""
+    global current_game
+    current_game = game_key
+    config = GAME_CONFIG[game_key]
     
-    INITIALIZED = True
-    logging.info("✅ Đã cập nhật xong dữ liệu")
+    # Reset dữ liệu
+    khoi_tao_du_lieu()
+    
+    # Khởi động threads
+    threading.Thread(target=cap_nhat_loai, args=('hu', config['hu_url']), daemon=True).start()
+    threading.Thread(target=cap_nhat_loai, args=('md5', config['md5_url']), daemon=True).start()
+    logging.info(f"🔄 Đã chuyển sang game: {config['name']}")
+
+# Khởi động mặc định với BETVIP
+start_updater('betvip')
 
 # ======= ROUTES =======
 @app.route('/')
 def index():
-    global du_lieu
-    
-    # Đợi dữ liệu được load
-    wait_time = 0
-    max_wait = 10
-    
-    while wait_time < max_wait and not INITIALIZED:
-        time.sleep(0.5)
-        wait_time += 0.5
-    
-    hu_data = du_lieu.get('hu', {}).get('du_doan_van_tiep', {})
-    md5_data = du_lieu.get('md5', {}).get('du_doan_van_tiep', {})
-    
     return render_template_string(HTML_TEMPLATE, 
                                  du_lieu=du_lieu, 
                                  game_config=GAME_CONFIG,
-                                 current_game=current_game,
-                                 hu_data=hu_data or {},
-                                 md5_data=md5_data or {})
+                                 current_game=current_game)
+
+@app.route('/api/du_lieu/<loai>')
+def api_du_lieu(loai):
+    return jsonify(du_lieu.get(loai, {}).get('du_doan_van_tiep'))
 
 @app.route('/api/all')
 def api_all():
     result = {}
-    for loai in ['hu', 'md5']:
+    for loai in ['hu', 'md5']:  # HŨ trước, MD5 sau
         data = du_lieu[loai]
         result[loai] = {
             'du_doan_van_tiep': data['du_doan_van_tiep'],
             'van_gan_nhat': data['van_gan_nhat'],
             'thong_ke_tong_hop': data['thong_ke_tong_hop'],
             'thoi_gian_cap_nhat': data['thoi_gian_cap_nhat'],
-            'lich_su_dung_sai': list(data['lich_su_dung_sai'])[-30:] if data['lich_su_dung_sai'] else []
+            'lich_su_dung_sai': list(data['lich_su_dung_sai'])[-30:]
         }
     return jsonify(result)
 
 @app.route('/api/switch_game', methods=['POST'])
 def switch_game():
+    """API để chuyển đổi game"""
     data = request.get_json()
     game_key = data.get('game')
     
@@ -615,10 +554,8 @@ def switch_game():
     if not GAME_CONFIG[game_key]['active']:
         return jsonify({'error': 'Game đang bảo trì'}), 400
     
-    global current_game
-    current_game = game_key
-    
-    cap_nhat_du_lieu()
+    # Khởi động lại updater với game mới
+    start_updater(game_key)
     
     return jsonify({
         'success': True,
@@ -626,31 +563,17 @@ def switch_game():
         'message': f'Đã chuyển sang {GAME_CONFIG[game_key]["name"]}'
     })
 
-# ======= KHỞI ĐỘNG =======
-khoi_tao_du_lieu()
-cap_nhat_du_lieu()
-
-# Scheduler cập nhật mỗi 5 giây
-scheduler = BackgroundScheduler()
-scheduler.add_job(func=cap_nhat_du_lieu, trigger="interval", seconds=5)
-scheduler.start()
-
-logging.info("🚀 Khởi động NEXUS·TX với Dice History Retrieval Engine...")
-logging.info("📊 Scheduler sẽ cập nhật dữ liệu mỗi 5 giây")
-
-# ======= HTML TEMPLATE (giữ nguyên như code của bạn) =======
-# ... (phần HTML_TEMPLATE giữ nguyên, chỉ thay đổi ở trên)
+# ======= HTML TEMPLATE =======
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="vi">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>NEXUS · Tài Xỉu Dice History</title>
+<title>NEXUS · Tài Xỉu 5 Method</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-/* ... giữ nguyên CSS ... */
 :root{
   --bg-0:#05060a; --bg-1:#0a0d16; --bg-2:#0e1320;
   --glass:rgba(255,255,255,.04); --glass-2:rgba(255,255,255,.07);
@@ -717,6 +640,7 @@ body{
 .hud-label{font-size:.62em; color:var(--text-faint); text-transform:uppercase; letter-spacing:1px}
 .hud-value{font-size:.84em; font-weight:600; color:var(--text)}
 
+/* Game Selector */
 .game-selector {
   display:flex; align-items:center; gap:10px;
   background:var(--glass-2); border:1px solid var(--border);
@@ -775,9 +699,11 @@ body{
 .dual-grid{display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-bottom:18px}
 @media(max-width:860px){.dual-grid{grid-template-columns:1fr}}
 
+/* HŨ - đứng trước */
 #hu-container .gcard { border-color:rgba(255,140,66,.3); }
 #hu-container .eyebrow:first-child { color:var(--orange); }
 
+/* MD5 - đứng sau */
 #md5-container .gcard { border-color:rgba(59,158,255,.3); }
 #md5-container .eyebrow:first-child { color:var(--blue); }
 
@@ -813,14 +739,22 @@ body{
 .metric-num{font-family:'JetBrains Mono',monospace; font-weight:700; font-size:1em; color:var(--text)}
 .metric-lbl{font-size:.58em; color:var(--text-faint); text-transform:uppercase; letter-spacing:.6px; margin-top:3px}
 
-.engine-stats{display:grid; grid-template-columns:repeat(4,1fr); gap:10px; padding:16px 22px 20px}
-@media(max-width:600px){.engine-stats{grid-template-columns:1fr 1fr}}
-.engine-stat{
+.model-grid{display:grid; grid-template-columns:repeat(5,1fr); gap:10px; padding:16px 22px 20px}
+@media(max-width:700px){.model-grid{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:450px){.model-grid{grid-template-columns:1fr 1fr}}
+.model-card{
   background:var(--glass-2); border:1px solid var(--border); border-radius:var(--radius-sm);
-  padding:14px; display:flex; flex-direction:column; gap:3px;
+  padding:12px; position:relative; overflow:hidden; transition:transform .3s, border-color .3s;
 }
-.engine-stat .v{font-family:'JetBrains Mono',monospace; font-weight:700; font-size:1.2em}
-.engine-stat .l{font-size:.62em; color:var(--text-faint); text-transform:uppercase; letter-spacing:.6px}
+.model-card:hover{transform:translateY(-2px); border-color:var(--border-strong)}
+.model-card::after{content:''; position:absolute; top:0; left:0; width:100%; height:2px; background:var(--accent, var(--blue))}
+.model-top{display:flex; justify-content:space-between; align-items:center; margin-bottom:8px}
+.model-name{font-size:.7em; font-weight:600; color:var(--text)}
+.model-weight{font-size:.58em; color:var(--text-faint); font-family:'JetBrains Mono',monospace}
+.model-pct{font-family:'JetBrains Mono',monospace; font-weight:700; font-size:1.1em; line-height:1}
+.model-side{font-size:.58em; color:var(--text-faint); margin-top:1px; text-transform:uppercase; letter-spacing:.5px}
+.model-bar-track{height:3px; border-radius:3px; background:rgba(255,255,255,.07); margin-top:8px; overflow:hidden}
+.model-bar-fill{height:100%; border-radius:3px; transition:width .8s cubic-bezier(.22,1,.36,1)}
 
 .stats-grid{display:grid; grid-template-columns:repeat(4,1fr); gap:10px; padding:16px 22px 20px}
 @media(max-width:600px){.stats-grid{grid-template-columns:1fr 1fr}}
@@ -902,6 +836,7 @@ body{
   </header>
 
   <div class="dual-grid" id="dual-grid">
+    <!-- HŨ - Đặt lên đầu -->
     <div id="hu-container">
       <div class="gcard">
         <div class="gcard-head">
@@ -942,21 +877,48 @@ body{
             </div>
           </div>
           <div class="metric-strip">
-            <div class="metric-cell"><div class="metric-num" id="hu-m-samples">0</div><div class="metric-lbl">Mẫu khớp</div></div>
-            <div class="metric-cell"><div class="metric-num" id="hu-m-exact">0</div><div class="metric-lbl">Khớp chính xác</div></div>
-            <div class="metric-cell"><div class="metric-num" id="hu-m-similar">0</div><div class="metric-lbl">Khớp tương đồng</div></div>
+            <div class="metric-cell"><div class="metric-num" id="hu-m-streak">0</div><div class="metric-lbl">Chuỗi</div></div>
+            <div class="metric-cell"><div class="metric-num" id="hu-m-taixiu">0–0</div><div class="metric-lbl">Tài–Xỉu</div></div>
             <div class="metric-cell"><div class="metric-num" id="hu-m-conf">0%</div><div class="metric-lbl">Độ tin cậy</div></div>
+            <div class="metric-cell"><div class="metric-num" id="hu-m-rounds">0</div><div class="metric-lbl">Tổng ván</div></div>
           </div>
         </div>
-        <div class="engine-stats" id="hu-engine">
-          <div class="engine-stat"><span class="v mono" id="hu-es-similarity" style="color:var(--orange)">0%</span><span class="l">Độ tương đồng</span></div>
-          <div class="engine-stat"><span class="v mono" id="hu-es-history">0</span><span class="l">Tổng lịch sử</span></div>
-          <div class="engine-stat"><span class="v mono" id="hu-es-taixiu">0-0</span><span class="l">Tài-Xỉu</span></div>
-          <div class="engine-stat"><span class="v mono" id="hu-es-signal">N/A</span><span class="l">Tín hiệu</span></div>
+        <div class="model-grid" id="hu-models">
+          <div class="model-card" style="--accent:#ff8c42">
+            <div class="model-top"><span class="model-name">Markov</span><span class="model-weight">w 0%</span></div>
+            <div class="model-pct" style="color:#ff8c42">50%</div>
+            <div class="model-side">nghiêng —</div>
+            <div class="model-bar-track"><div class="model-bar-fill" style="width:50%; background:#ff8c42"></div></div>
+          </div>
+          <div class="model-card" style="--accent:#ff8c42">
+            <div class="model-top"><span class="model-name">Chu kỳ</span><span class="model-weight">w 0%</span></div>
+            <div class="model-pct" style="color:#ff8c42">50%</div>
+            <div class="model-side">nghiêng —</div>
+            <div class="model-bar-track"><div class="model-bar-fill" style="width:50%; background:#ff8c42"></div></div>
+          </div>
+          <div class="model-card" style="--accent:#ff8c42">
+            <div class="model-top"><span class="model-name">ML</span><span class="model-weight">w 0%</span></div>
+            <div class="model-pct" style="color:#ff8c42">50%</div>
+            <div class="model-side">nghiêng —</div>
+            <div class="model-bar-track"><div class="model-bar-fill" style="width:50%; background:#ff8c42"></div></div>
+          </div>
+          <div class="model-card" style="--accent:#ff8c42">
+            <div class="model-top"><span class="model-name">Bayesian</span><span class="model-weight">w 0%</span></div>
+            <div class="model-pct" style="color:#ff8c42">50%</div>
+            <div class="model-side">nghiêng —</div>
+            <div class="model-bar-track"><div class="model-bar-fill" style="width:50%; background:#ff8c42"></div></div>
+          </div>
+          <div class="model-card" style="--accent:#ff8c42">
+            <div class="model-top"><span class="model-name">Pattern</span><span class="model-weight">w 0%</span></div>
+            <div class="model-pct" style="color:#ff8c42">50%</div>
+            <div class="model-side">nghiêng —</div>
+            <div class="model-bar-track"><div class="model-bar-fill" style="width:50%; background:#ff8c42"></div></div>
+          </div>
         </div>
       </div>
     </div>
 
+    <!-- MD5 - Đặt sau -->
     <div id="md5-container">
       <div class="gcard">
         <div class="gcard-head">
@@ -997,22 +959,49 @@ body{
             </div>
           </div>
           <div class="metric-strip">
-            <div class="metric-cell"><div class="metric-num" id="md5-m-samples">0</div><div class="metric-lbl">Mẫu khớp</div></div>
-            <div class="metric-cell"><div class="metric-num" id="md5-m-exact">0</div><div class="metric-lbl">Khớp chính xác</div></div>
-            <div class="metric-cell"><div class="metric-num" id="md5-m-similar">0</div><div class="metric-lbl">Khớp tương đồng</div></div>
+            <div class="metric-cell"><div class="metric-num" id="md5-m-streak">0</div><div class="metric-lbl">Chuỗi</div></div>
+            <div class="metric-cell"><div class="metric-num" id="md5-m-taixiu">0–0</div><div class="metric-lbl">Tài–Xỉu</div></div>
             <div class="metric-cell"><div class="metric-num" id="md5-m-conf">0%</div><div class="metric-lbl">Độ tin cậy</div></div>
+            <div class="metric-cell"><div class="metric-num" id="md5-m-rounds">0</div><div class="metric-lbl">Tổng ván</div></div>
           </div>
         </div>
-        <div class="engine-stats" id="md5-engine">
-          <div class="engine-stat"><span class="v mono" id="md5-es-similarity" style="color:var(--blue)">0%</span><span class="l">Độ tương đồng</span></div>
-          <div class="engine-stat"><span class="v mono" id="md5-es-history">0</span><span class="l">Tổng lịch sử</span></div>
-          <div class="engine-stat"><span class="v mono" id="md5-es-taixiu">0-0</span><span class="l">Tài-Xỉu</span></div>
-          <div class="engine-stat"><span class="v mono" id="md5-es-signal">N/A</span><span class="l">Tín hiệu</span></div>
+        <div class="model-grid" id="md5-models">
+          <div class="model-card" style="--accent:#3b9eff">
+            <div class="model-top"><span class="model-name">Markov</span><span class="model-weight">w 0%</span></div>
+            <div class="model-pct" style="color:#3b9eff">50%</div>
+            <div class="model-side">nghiêng —</div>
+            <div class="model-bar-track"><div class="model-bar-fill" style="width:50%; background:#3b9eff"></div></div>
+          </div>
+          <div class="model-card" style="--accent:#3b9eff">
+            <div class="model-top"><span class="model-name">Chu kỳ</span><span class="model-weight">w 0%</span></div>
+            <div class="model-pct" style="color:#3b9eff">50%</div>
+            <div class="model-side">nghiêng —</div>
+            <div class="model-bar-track"><div class="model-bar-fill" style="width:50%; background:#3b9eff"></div></div>
+          </div>
+          <div class="model-card" style="--accent:#3b9eff">
+            <div class="model-top"><span class="model-name">ML</span><span class="model-weight">w 0%</span></div>
+            <div class="model-pct" style="color:#3b9eff">50%</div>
+            <div class="model-side">nghiêng —</div>
+            <div class="model-bar-track"><div class="model-bar-fill" style="width:50%; background:#3b9eff"></div></div>
+          </div>
+          <div class="model-card" style="--accent:#3b9eff">
+            <div class="model-top"><span class="model-name">Bayesian</span><span class="model-weight">w 0%</span></div>
+            <div class="model-pct" style="color:#3b9eff">50%</div>
+            <div class="model-side">nghiêng —</div>
+            <div class="model-bar-track"><div class="model-bar-fill" style="width:50%; background:#3b9eff"></div></div>
+          </div>
+          <div class="model-card" style="--accent:#3b9eff">
+            <div class="model-top"><span class="model-name">Pattern</span><span class="model-weight">w 0%</span></div>
+            <div class="model-pct" style="color:#3b9eff">50%</div>
+            <div class="model-side">nghiêng —</div>
+            <div class="model-bar-track"><div class="model-bar-fill" style="width:50%; background:#3b9eff"></div></div>
+          </div>
         </div>
       </div>
     </div>
   </div>
 
+  <!-- STATISTICS -->
   <div class="gcard" style="margin-bottom:18px">
     <div class="gcard-head">
       <span class="eyebrow">📊 Thống kê tổng hợp</span>
@@ -1025,6 +1014,7 @@ body{
     </div>
   </div>
 
+  <!-- HISTORY -->
   <div class="gcard">
     <div class="gcard-head">
       <span class="eyebrow">📜 Lịch sử dự đoán</span>
@@ -1038,41 +1028,24 @@ body{
     </div>
   </div>
 
-  <footer class="foot">NEXUS·TX · Dice History Retrieval Engine</footer>
+  <footer class="foot">NEXUS·TX</footer>
 </div>
 
 <script>
-// Dữ liệu từ server
-const INITIAL_HU_DATA = {{ hu_data|tojson }};
-const INITIAL_MD5_DATA = {{ md5_data|tojson }};
-
 const GAUGE_CIRC = 534.07;
 
-console.log('📊 Initial HU Data:', INITIAL_HU_DATA);
-console.log('📊 Initial MD5 Data:', INITIAL_MD5_DATA);
-
 function updateType(type, data) {
-  console.log('🔄 Updating', type, 'Data:', data);
-  
-  if (!data || typeof data !== 'object') {
+  if (!data || data.tong_so_van < 15) {
     document.getElementById(type + '-call').textContent = 'Đang thu thập...';
     return;
   }
-  
-  if (!data.tong_so_van || data.tong_so_van < 5) {
-    document.getElementById(type + '-call').textContent = 'Đang thu thập...';
-    console.log('⚠️ ' + type + ': tong_so_van =', data.tong_so_van);
-    return;
-  }
-  
-  console.log('✅ ' + type + ': tong_so_van =', data.tong_so_van, 'Prediction:', data.khuyen_nghi);
   
   const prefix = type;
   const isTai = data.khuyen_nghi === 'TAI';
   const isXiu = data.khuyen_nghi === 'XIU';
-  const isNoSignal = data.khuyen_nghi === 'NO SIGNAL' || data.khuyen_nghi === 'CHUA_DU_DU_LIEU';
   const prob = isTai ? data.xac_suat_tai : (isXiu ? data.xac_suat_xiu : 0.5);
-  const callColor = isTai ? '#3b9eff' : (isXiu ? '#ff4d6d' : (isNoSignal ? '#ffb454' : '#ffb454'));
+  const callColor = isTai ? '#3b9eff' : (isXiu ? '#ff4d6d' : '#ffb454');
+  const accentColor = type === 'md5' ? '#3b9eff' : '#ff8c42';
   
   const gauge = document.getElementById(prefix + '-gauge');
   if (gauge) {
@@ -1082,59 +1055,37 @@ function updateType(type, data) {
   
   const callEl = document.getElementById(prefix + '-call');
   if (callEl) {
-    callEl.textContent = data.khuyen_nghi === 'NO SIGNAL' ? '⏸️ NO SIGNAL' : 
-                         data.khuyen_nghi === 'CHUA_DU_DU_LIEU' ? '⏳ ĐANG THU THẬP' :
-                         data.khuyen_nghi === 'CÂN NHẮC' ? '⚖️ CÂN NHẮC' : data.khuyen_nghi;
+    callEl.textContent = data.khuyen_nghi === 'CAN_NHAC' ? '⚠️ CÂN NHẮC' : 
+                         data.khuyen_nghi === 'THAN_TRONG' ? '⚡ THẬN TRỌNG' : data.khuyen_nghi;
     callEl.style.color = callColor;
   }
   
-  document.getElementById(prefix + '-conf').textContent = (data.do_tin_cay_so || 0) + '%';
+  document.getElementById(prefix + '-conf').textContent = data.do_tin_cay_so + '%';
   document.getElementById(prefix + '-pct-tai').textContent = (data.xac_suat_tai * 100).toFixed(1) + '%';
   document.getElementById(prefix + '-pct-xiu').textContent = (data.xac_suat_xiu * 100).toFixed(1) + '%';
   document.getElementById(prefix + '-bar-tai').style.width = (data.xac_suat_tai * 100) + '%';
   document.getElementById(prefix + '-bar-xiu').style.width = (data.xac_suat_xiu * 100) + '%';
   
-  document.getElementById(prefix + '-m-samples').textContent = data.samples || 0;
-  document.getElementById(prefix + '-m-exact').textContent = data.exact_samples || 0;
-  document.getElementById(prefix + '-m-similar').textContent = data.similar_samples || 0;
-  document.getElementById(prefix + '-m-conf').textContent = (data.do_tin_cay_so || 0) + '%';
-  
-  document.getElementById(prefix + '-es-similarity').textContent = (data.similarity_score || 0) + '%';
-  document.getElementById(prefix + '-es-history').textContent = data.tong_so_van || 0;
-  document.getElementById(prefix + '-es-taixiu').textContent = (data.so_tai || 0) + '-' + (data.so_xiu || 0);
-  
-  const signalEl = document.getElementById(prefix + '-es-signal');
-  if (data.signal === 'NO_SIGNAL') {
-    signalEl.textContent = '⏸️ N/A';
-    signalEl.style.color = '#ffb454';
-  } else if (data.signal === 'TAI') {
-    signalEl.textContent = '⬆️ TÀI';
-    signalEl.style.color = '#3b9eff';
-  } else if (data.signal === 'XIU') {
-    signalEl.textContent = '⬇️ XỈU';
-    signalEl.style.color = '#ff4d6d';
-  } else {
-    signalEl.textContent = data.signal || 'N/A';
-  }
-  
+  document.getElementById(prefix + '-m-streak').textContent = data.chieu_dai_chuoi;
+  document.getElementById(prefix + '-m-taixiu').textContent = data.so_tai + '–' + data.so_xiu;
+  document.getElementById(prefix + '-m-conf').textContent = data.do_tin_cay_so + '%';
+  document.getElementById(prefix + '-m-rounds').textContent = data.tong_so_van;
   document.getElementById(prefix + '-last-result').textContent = data.ket_qua_hien_tai || '—';
   
-  const diceContainer = document.getElementById(prefix + '-last-dice');
-  if (data.last_dice && data.last_dice.length > 0) {
-    diceContainer.innerHTML = data.last_dice.map(d => `<span class="die mono">${d}</span>`).join('');
-  } else {
-    diceContainer.innerHTML = '<span class="die mono">—</span>';
-  }
+  const modelKeys = ['p_markov', 'p_chu_ky', 'p_ml', 'p_bayes', 'p_pattern'];
+  const weightKeys = ['markov', 'fft', 'ml', 'bayes', 'pattern'];
+  const cards = document.getElementById(prefix + '-models').querySelectorAll('.model-card');
+  cards.forEach((card, idx) => {
+    if (idx >= modelKeys.length) return;
+    const p = data[modelKeys[idx]] || 0.5;
+    const w = data.trong_so ? data.trong_so[weightKeys[idx]] : 0.20;
+    card.querySelector('.model-pct').textContent = (p * 100).toFixed(1) + '%';
+    card.querySelector('.model-pct').style.color = p >= 0.5 ? accentColor : '#ff4d6d';
+    card.querySelector('.model-side').textContent = 'nghiêng ' + (p >= 0.5 ? 'TÀI' : 'XỈU');
+    card.querySelector('.model-weight').textContent = 'w ' + (w * 100).toFixed(0) + '%';
+    card.querySelector('.model-bar-fill').style.width = (p * 100) + '%';
+  });
 }
-
-document.addEventListener('DOMContentLoaded', function() {
-    if (INITIAL_HU_DATA && INITIAL_HU_DATA.tong_so_van && INITIAL_HU_DATA.tong_so_van >= 5) {
-        updateType('hu', INITIAL_HU_DATA);
-    }
-    if (INITIAL_MD5_DATA && INITIAL_MD5_DATA.tong_so_van && INITIAL_MD5_DATA.tong_so_van >= 5) {
-        updateType('md5', INITIAL_MD5_DATA);
-    }
-});
 
 function updateStats(data) {
   if (!data) return;
@@ -1160,7 +1111,7 @@ function renderTimeline(history) {
   wrap.innerHTML = history.slice().reverse().slice(0, 30).map(item => {
     const winColor = item.dung ? '#2bd97c' : '#ff4d6d';
     const statusIcon = item.dung ? '✅ THẮNG' : '❌ THUA';
-    const typeLabel = item.loai === 'hu' ? '🟠Hũ' : '🔷MD5';
+    const typeLabel = item.loai === 'hu' ? '🟠Tài Xỉu' : '🔷 Tài Xỉu MD5';
     return `
       <div class="t-row">
         <div class="t-rail">
@@ -1202,13 +1153,15 @@ document.querySelectorAll('.game-btn').forEach(btn => {
       if (data.success) {
         document.querySelectorAll('.game-btn').forEach(b => b.classList.remove('active'));
         this.classList.add('active');
+        // Refresh dữ liệu
         await fetchData();
+        // Cập nhật link đặt cược
         const betBtn = document.querySelector('.bet-btn');
         if (betBtn) {
           const configs = {{ game_config|tojson }};
           betBtn.href = configs[game].bet_url;
         }
-        location.reload();
+        location.reload(); // Reload để cập nhật dữ liệu
       }
     } catch(e) {
       console.error('Switch game error:', e);
@@ -1221,15 +1174,8 @@ async function fetchData() {
     const res = await fetch('/api/all', {cache:'no-store'});
     if (!res.ok) return;
     const data = await res.json();
-    console.log('📊 Data received from API:', data);
-    
-    if (data.hu && data.hu.du_doan_van_tiep) {
-      updateType('hu', data.hu.du_doan_van_tiep);
-    }
-    if (data.md5 && data.md5.du_doan_van_tiep) {
-      updateType('md5', data.md5.du_doan_van_tiep);
-    }
-    
+    updateType('hu', data.hu?.du_doan_van_tiep);
+    updateType('md5', data.md5?.du_doan_van_tiep);
     updateStats(data);
     
     const allHistory = [];
@@ -1239,11 +1185,9 @@ async function fetchData() {
     if (data.md5?.lich_su_dung_sai) {
       data.md5.lich_su_dung_sai.forEach(h => { h.loai = 'md5'; allHistory.push(h); });
     }
-    allHistory.sort((a,b) => a.thoi_gian?.localeCompare(b.thoi_gian));
+    allHistory.sort((a,b) => a.thoi_gian.localeCompare(b.thoi_gian));
     renderTimeline(allHistory);
-  } catch(e) {
-    console.error('❌ Fetch error:', e);
-  }
+  } catch(e) {}
 }
 
 fetchData();
@@ -1255,5 +1199,8 @@ setInterval(fetchData, 3000);
 
 # ======= MAIN =======
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    logging.info("🚀 Khởi động NEXUS·TX với 5 phương pháp phân tích...")
+    logging.info("📊 HŨ: ngưỡng 53% | MD5: ngưỡng 58%")
+    logging.info("📈 5 phương pháp: Markov, Chu kỳ, ML, Bayesian, Pattern")
+    logging.info(f"🎮 Game hiện tại: {GAME_CONFIG[current_game]['name']}")
+    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
